@@ -1,4 +1,6 @@
+import sys
 from contextlib import asynccontextmanager
+from urllib.request import urlopen
 
 import httpx
 import openai
@@ -11,8 +13,6 @@ from app.config import settings
 
 def _setup_logging() -> None:
     """Configure loguru — JSON when LOG_JSON=true, plain text otherwise."""
-    import sys
-
     logger.remove()
     if settings.LOG_JSON:
         logger.add(
@@ -34,9 +34,7 @@ def _setup_logging() -> None:
 
 def _check_qdrant() -> bool:
     try:
-        import urllib.request
-
-        req = urllib.request.urlopen(f"{settings.QDRANT_URL}/healthz", timeout=5)
+        req = urlopen(f"{settings.QDRANT_URL}/healthz", timeout=5)
         return req.status == 200
     except Exception:
         return False

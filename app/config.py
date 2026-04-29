@@ -1,8 +1,10 @@
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     """Application configuration — single source of truth."""
+
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
     # LLM & Embeddings
     OPENAI_API_KEY: str = ""
@@ -87,8 +89,6 @@ class Settings(BaseSettings):
     # Logging
     LOG_JSON: bool = False
     LOG_LEVEL: str = "INFO"
-
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 
 settings = Settings()
