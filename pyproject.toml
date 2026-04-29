@@ -17,6 +17,10 @@ dependencies = [
     "openai>=1.54.0",
     "tiktoken>=0.8.0",
 
+    # Agent orchestration
+    "langgraph>=0.2.50",
+    "langgraph-checkpoint-postgres>=2.0",
+
     # Vector DB & embeddings
     "qdrant-client>=1.12.0",
 
@@ -31,6 +35,7 @@ dependencies = [
 
     # Cache
     "upstash-redis>=1.2.0",
+    "httpx>=0.27.0",
 
     # Auth
     "pyjwt>=2.10.0",
