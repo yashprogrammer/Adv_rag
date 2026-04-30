@@ -39,6 +39,10 @@ dependencies = [
     # Logging
     "loguru>=0.7.2",
 
+    # Agent orchestration
+    "langgraph>=0.2.50",
+    "langgraph-checkpoint-postgres>=2.0",
+
     # === Phase 2+ deps pinned now to avoid churn ===
     "sentence-transformers>=3.3.0",
     "voyageai>=0.3.0",
