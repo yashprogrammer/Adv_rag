@@ -42,13 +42,13 @@ variable "container_port" {
 variable "ecs_task_cpu" {
   description = "Fargate task CPU units."
   type        = number
-  default     = 512
+  default     = 2048
 }
 
 variable "ecs_task_memory" {
   description = "Fargate task memory (MiB)."
   type        = number
-  default     = 1024
+  default     = 16384
 }
 
 variable "desired_count" {
@@ -66,7 +66,7 @@ variable "assign_public_ip" {
 variable "health_check_path" {
   description = "ALB target group health check path."
   type        = string
-  default     = "/health"
+  default     = "/admin/health"
 }
 
 variable "log_retention_days" {
@@ -96,13 +96,13 @@ variable "database_url_secret_arn" {
   type        = string
 }
 
-variable "upstash_redis_rest_url_secret_arn" {
-  description = "Secrets Manager secret ARN for UPSTASH_REDIS_REST_URL."
+variable "upstash_redis_url_secret_arn" {
+  description = "Secrets Manager secret ARN for UPSTASH_REDIS_URL."
   type        = string
 }
 
-variable "upstash_redis_rest_token_secret_arn" {
-  description = "Secrets Manager secret ARN for UPSTASH_REDIS_REST_TOKEN."
+variable "upstash_redis_token_secret_arn" {
+  description = "Secrets Manager secret ARN for UPSTASH_REDIS_TOKEN."
   type        = string
 }
 

@@ -62,8 +62,8 @@ data "aws_iam_policy_document" "ecs_execution_secrets" {
       var.openai_api_key_secret_arn,
       var.jwt_secret_secret_arn,
       var.database_url_secret_arn,
-      var.upstash_redis_rest_url_secret_arn,
-      var.upstash_redis_rest_token_secret_arn,
+      var.upstash_redis_url_secret_arn,
+      var.upstash_redis_token_secret_arn,
       var.tavily_api_key_secret_arn
     ]
   }
@@ -249,6 +249,48 @@ resource "aws_efs_access_point" "app" {
   tags = local.tags
 }
 
+resource "aws_efs_access_point" "qdrant" {
+  file_system_id = aws_efs_file_system.app.id
+
+  posix_user {
+    gid = 1000
+    uid = 1000
+  }
+
+  root_directory {
+    path = "/qdrant-data"
+
+    creation_info {
+      owner_gid   = 1000
+      owner_uid   = 1000
+      permissions = "0755"
+    }
+  }
+
+  tags = local.tags
+}
+
+resource "aws_efs_access_point" "postgres" {
+  file_system_id = aws_efs_file_system.app.id
+
+  posix_user {
+    gid = 1000
+    uid = 1000
+  }
+
+  root_directory {
+    path = "/postgres-data"
+
+    creation_info {
+      owner_gid   = 1000
+      owner_uid   = 1000
+      permissions = "0755"
+    }
+  }
+
+  tags = local.tags
+}
+
 resource "aws_ecs_task_definition" "app" {
   family                   = "${local.name_prefix}-task"
   network_mode             = "awsvpc"
@@ -267,6 +309,34 @@ resource "aws_ecs_task_definition" "app" {
 
       authorization_config {
         access_point_id = aws_efs_access_point.app.id
+        iam             = "ENABLED"
+      }
+    }
+  }
+
+  volume {
+    name = "qdrant-efs"
+
+    efs_volume_configuration {
+      file_system_id     = aws_efs_file_system.app.id
+      transit_encryption = "ENABLED"
+
+      authorization_config {
+        access_point_id = aws_efs_access_point.qdrant.id
+        iam             = "ENABLED"
+      }
+    }
+  }
+
+  volume {
+    name = "postgres-efs"
+
+    efs_volume_configuration {
+      file_system_id     = aws_efs_file_system.app.id
+      transit_encryption = "ENABLED"
+
+      authorization_config {
+        access_point_id = aws_efs_access_point.postgres.id
         iam             = "ENABLED"
       }
     }
@@ -303,14 +373,116 @@ resource "aws_ecs_task_definition" "app" {
         }
       }
 
+      environment = [
+        { name = "DATABASE_URL", value = "postgresql://postgres:postgres@localhost:5432/adv_rag" },
+        { name = "QDRANT_URL", value = "http://localhost:6333" }
+      ]
+
       secrets = [
         { name = "OPENAI_API_KEY", valueFrom = var.openai_api_key_secret_arn },
         { name = "JWT_SECRET", valueFrom = var.jwt_secret_secret_arn },
-        { name = "DATABASE_URL", valueFrom = var.database_url_secret_arn },
-        { name = "UPSTASH_REDIS_REST_URL", valueFrom = var.upstash_redis_rest_url_secret_arn },
-        { name = "UPSTASH_REDIS_REST_TOKEN", valueFrom = var.upstash_redis_rest_token_secret_arn },
+        { name = "UPSTASH_REDIS_URL", valueFrom = var.upstash_redis_url_secret_arn },
+        { name = "UPSTASH_REDIS_TOKEN", valueFrom = var.upstash_redis_token_secret_arn },
         { name = "TAVILY_API_KEY", valueFrom = var.tavily_api_key_secret_arn }
       ]
+
+      dependsOn = [
+        {
+          containerName = "postgres"
+          condition     = "HEALTHY"
+        },
+        {
+          containerName = "qdrant"
+          condition     = "HEALTHY"
+        }
+      ]
+    },
+    {
+      name      = "qdrant"
+      image     = "qdrant/qdrant:v1.17.0"
+      essential = true
+
+      portMappings = [
+        {
+          containerPort = 6333
+          hostPort      = 6333
+          protocol      = "tcp"
+        },
+        {
+          containerPort = 6334
+          hostPort      = 6334
+          protocol      = "tcp"
+        }
+      ]
+
+      mountPoints = [
+        {
+          sourceVolume  = "qdrant-efs"
+          containerPath = "/qdrant/storage"
+          readOnly      = false
+        }
+      ]
+
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          awslogs-group         = aws_cloudwatch_log_group.app.name
+          awslogs-region        = var.aws_region
+          awslogs-stream-prefix = "ecs"
+        }
+      }
+
+      healthCheck = {
+        command     = ["CMD-SHELL", "curl -f http://localhost:6333/healthz || exit 1"]
+        interval    = 30
+        timeout     = 5
+        retries     = 3
+        startPeriod = 60
+      }
+    },
+    {
+      name      = "postgres"
+      image     = "postgres:16"
+      essential = true
+
+      portMappings = [
+        {
+          containerPort = 5432
+          hostPort      = 5432
+          protocol      = "tcp"
+        }
+      ]
+
+      mountPoints = [
+        {
+          sourceVolume  = "postgres-efs"
+          containerPath = "/var/lib/postgresql/data"
+          readOnly      = false
+        }
+      ]
+
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          awslogs-group         = aws_cloudwatch_log_group.app.name
+          awslogs-region        = var.aws_region
+          awslogs-stream-prefix = "ecs"
+        }
+      }
+
+      environment = [
+        { name = "POSTGRES_USER", value = "postgres" },
+        { name = "POSTGRES_PASSWORD", value = "postgres" },
+        { name = "POSTGRES_DB", value = "adv_rag" }
+      ]
+
+      healthCheck = {
+        command     = ["CMD-SHELL", "pg_isready -U postgres"]
+        interval    = 30
+        timeout     = 5
+        retries     = 3
+        startPeriod = 60
+      }
     }
   ])
 
@@ -343,6 +515,12 @@ resource "aws_ecs_service" "app" {
     aws_lb_listener.http,
     aws_efs_mount_target.app
   ]
+
+  # Allow time for sidecar containers to start before ALB health checks
+  deployment_configuration {
+    maximum_percent         = 200
+    minimum_healthy_percent = 100
+  }
 
   tags = local.tags
 }

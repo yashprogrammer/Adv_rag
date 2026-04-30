@@ -1,30 +1,28 @@
-project_name  = "advproject"
-environment   = "dev"
-aws_region    = "us-east-1"
-vpc_id        = "vpc-0123456789abcdef0"
+# Terraform variables for ADV RAG deployment
+# Copy this file to terraform.tfvars and fill in your values.
 
-public_subnet_ids = [
-  "subnet-0123456789abcdef0",
-  "subnet-0123456789abcdef1"
-]
+project_name = "adv-rag"
+environment  = "prod"
+aws_region   = "us-east-1"
 
-private_subnet_ids = [
-  "subnet-0123456789abcdef2",
-  "subnet-0123456789abcdef3"
-]
+# Networking (must exist beforehand)
+vpc_id             = "vpc-xxxxxxxxxxxxxxxxx"
+public_subnet_ids  = ["subnet-xxxxxxxxxxxxxxxxx", "subnet-yyyyyyyyyyyyyyyyy"]
+private_subnet_ids = ["subnet-zzzzzzzzzzzzzzzzz", "subnet-wwwwwwwwwwwwwwwww"]
 
-container_image = "123456789012.dkr.ecr.us-east-1.amazonaws.com/advproject-dev-app:latest"
+# Container image (push to ECR first)
+container_image = "123456789012.dkr.ecr.us-east-1.amazonaws.com/adv-rag-prod-app:latest"
 
-desired_count = 1
+# Secrets Manager ARNs (create these first)
+openai_api_key_secret_arn    = "arn:aws:secretsmanager:us-east-1:123456789012:secret:openai-api-key-XXXXXX"
+jwt_secret_secret_arn        = "arn:aws:secretsmanager:us-east-1:123456789012:secret:jwt-secret-XXXXXX"
+database_url_secret_arn      = "arn:aws:secretsmanager:us-east-1:123456789012:secret:database-url-XXXXXX"
+upstash_redis_url_secret_arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:upstash-redis-url-XXXXXX"
+upstash_redis_token_secret_arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:upstash-redis-token-XXXXXX"
+tavily_api_key_secret_arn    = "arn:aws:secretsmanager:us-east-1:123456789012:secret:tavily-api-key-XXXXXX"
 
-openai_api_key_secret_arn         = "arn:aws:secretsmanager:us-east-1:123456789012:secret:openai-api-key"
-jwt_secret_secret_arn             = "arn:aws:secretsmanager:us-east-1:123456789012:secret:jwt-secret"
-database_url_secret_arn           = "arn:aws:secretsmanager:us-east-1:123456789012:secret:database-url"
-upstash_redis_rest_url_secret_arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:upstash-redis-rest-url"
-upstash_redis_rest_token_secret_arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:upstash-redis-rest-token"
-tavily_api_key_secret_arn         = "arn:aws:secretsmanager:us-east-1:123456789012:secret:tavily-api-key"
-
-enable_autoscaling       = true
-autoscaling_min_capacity = 1
-autoscaling_max_capacity = 3
-autoscaling_target_cpu   = 60
+# Optional overrides
+# ecs_task_cpu    = 2048
+# ecs_task_memory = 16384
+# desired_count   = 1
+# enable_autoscaling = false

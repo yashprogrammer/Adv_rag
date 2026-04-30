@@ -24,8 +24,18 @@ output "efs_file_system_id" {
 }
 
 output "efs_access_point_id" {
-  description = "EFS access point ID mounted by ECS tasks."
+  description = "EFS access point ID for app data mounted by ECS tasks."
   value       = aws_efs_access_point.app.id
+}
+
+output "efs_qdrant_access_point_id" {
+  description = "EFS access point ID for qdrant data."
+  value       = aws_efs_access_point.qdrant.id
+}
+
+output "efs_postgres_access_point_id" {
+  description = "EFS access point ID for postgres data."
+  value       = aws_efs_access_point.postgres.id
 }
 
 output "cloudwatch_log_group_name" {

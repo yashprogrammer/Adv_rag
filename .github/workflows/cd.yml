@@ -71,4 +71,26 @@ jobs:
       - name: Deploy ECS service
         env:
           ECS_TASK_DEFINITION_PATH: task-definition-rendered.json
-        run: ./scripts/deploy_ecs.sh
+        run: |
+          chmod +x ./scripts/deploy_ecs.sh
+          ./scripts/deploy_ecs.sh
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          ALB_DNS="$(aws elbv2 describe-load-balancers \
+            --names "${ECS_CLUSTER%-cluster}-alb" \
+            --region "$AWS_REGION" \
+            --query 'LoadBalancers[0].DNSName' \
+            --output text)"
+          echo "ALB DNS: $ALB_DNS"
+          for i in {1..12}; do
+            if curl -sf "http://$ALB_DNS/admin/health" >/dev/null; then
+              echo "✅ Smoke test passed"
+              exit 0
+            fi
+            echo "Waiting for service... attempt $i/12"
+            sleep 15
+          done
+          echo "❌ Smoke test failed"
+          exit 1
