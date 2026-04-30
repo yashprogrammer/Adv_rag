@@ -1,0 +1,30 @@
+project_name  = "advproject"
+environment   = "dev"
+aws_region    = "us-east-1"
+vpc_id        = "vpc-0123456789abcdef0"
+
+public_subnet_ids = [
+  "subnet-0123456789abcdef0",
+  "subnet-0123456789abcdef1"
+]
+
+private_subnet_ids = [
+  "subnet-0123456789abcdef2",
+  "subnet-0123456789abcdef3"
+]
+
+container_image = "123456789012.dkr.ecr.us-east-1.amazonaws.com/advproject-dev-app:latest"
+
+desired_count = 1
+
+openai_api_key_secret_arn         = "arn:aws:secretsmanager:us-east-1:123456789012:secret:openai-api-key"
+jwt_secret_secret_arn             = "arn:aws:secretsmanager:us-east-1:123456789012:secret:jwt-secret"
+database_url_secret_arn           = "arn:aws:secretsmanager:us-east-1:123456789012:secret:database-url"
+upstash_redis_rest_url_secret_arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:upstash-redis-rest-url"
+upstash_redis_rest_token_secret_arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:upstash-redis-rest-token"
+tavily_api_key_secret_arn         = "arn:aws:secretsmanager:us-east-1:123456789012:secret:tavily-api-key"
+
+enable_autoscaling       = true
+autoscaling_min_capacity = 1
+autoscaling_max_capacity = 3
+autoscaling_target_cpu   = 60
