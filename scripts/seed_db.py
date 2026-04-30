@@ -64,5 +64,30 @@ def main() -> None:
     logger.info("Done.")
 
 
+def seed_docs() -> None:
+    import glob
+
+    from app.models import RetrievedChunk
+    from app.services.document_processor import DocumentProcessor
+    from app.services.embedding_service import embed_texts
+    from app.services.vector_store import upsert_chunks
+
+    processor = DocumentProcessor()
+    docs_dir = os.path.join(os.path.dirname(__file__), "..", "seed", "docs")
+    for path in glob.glob(os.path.join(docs_dir, "*.txt")):
+        logger.info("Ingesting seed doc: {}", path)
+        chunks_meta = processor.process_document(path)
+        chunks = [RetrievedChunk(text=c["text"], source=c["source"]) for c in chunks_meta]
+        if chunks:
+            texts = [c.text for c in chunks]
+            embeddings = embed_texts(texts)
+            upsert_chunks(chunks, embeddings)
+
+
+if __name__ == "__main__":
+    main()
+    seed_docs()
+
+
 if __name__ == "__main__":
     main()
