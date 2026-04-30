@@ -3,10 +3,11 @@
 import asyncio
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from loguru import logger
 
 from app.config import settings
+from app.middleware.auth import User, require_admin
 
 router = APIRouter(tags=["admin"])
 
@@ -91,4 +92,16 @@ async def health_check() -> dict[str, Any]:
         "postgres": postgres_ok,
         "redis": redis_ok,
         "openai": openai_ok,
+    }
+
+
+@router.get("/admin/cache/stats")
+async def cache_stats(user: User = Depends(require_admin)) -> dict:
+    """Return per-cache hit/miss counts (placeholder until Phase 4)."""
+    return {
+        "embedding": {"hits": 0, "misses": 0},
+        "rag": {"hits": 0, "misses": 0},
+        "sql_gen": {"hits": 0, "misses": 0},
+        "sql_result": {"hits": 0, "misses": 0},
+        "intent_router": {"hits": 0, "misses": 0},
     }
