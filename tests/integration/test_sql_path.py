@@ -26,12 +26,13 @@ def test_query_sql_path_returns_pending_sql(client: TestClient, token: str) -> N
     with patch("app.api.query.is_allowed_user", return_value=(True, 19, 1)):
         with patch("app.api.query.check_budget", return_value=(True, 99_000)):
             with patch("app.api.query.consume_budget", return_value={"used": 1010}):
-                with patch("app.core.graph.sql_service.generate_sql") as mock_gen:
-                    mock_gen.return_value = {
-                        "sql": "SELECT COUNT(*) FROM customers WHERE country = 'Germany'",
-                        "explanation": "Count German customers",
-                    }
-                    resp = client.post(
+                with patch("app.core.graph.classify_intent", return_value="sql"):
+                    with patch("app.core.graph.sql_service.generate_sql") as mock_gen:
+                        mock_gen.return_value = {
+                            "sql": "SELECT COUNT(*) FROM customers WHERE country = 'Germany'",
+                            "explanation": "Count German customers",
+                        }
+                        resp = client.post(
                         "/query",
                         json={"question": "How many customers in Germany?"},
                         headers={"Authorization": f"Bearer {token}"},
@@ -48,12 +49,13 @@ def test_sql_execute_approved_returns_results(client: TestClient, token: str) ->
     with patch("app.api.query.is_allowed_user", return_value=(True, 19, 1)):
         with patch("app.api.query.check_budget", return_value=(True, 99_000)):
             with patch("app.api.query.consume_budget", return_value={"used": 1010}):
-                with patch("app.core.graph.sql_service.generate_sql") as mock_gen:
-                    mock_gen.return_value = {
-                        "sql": "SELECT COUNT(*) AS count FROM customers WHERE country = 'Germany'",
-                        "explanation": "Count German customers",
-                    }
-                    resp = client.post(
+                with patch("app.core.graph.classify_intent", return_value="sql"):
+                    with patch("app.core.graph.sql_service.generate_sql") as mock_gen:
+                        mock_gen.return_value = {
+                            "sql": "SELECT COUNT(*) AS count FROM customers WHERE country = 'Germany'",
+                            "explanation": "Count German customers",
+                        }
+                        resp = client.post(
                         "/query",
                         json={"question": "How many customers in Germany?"},
                         headers={"Authorization": f"Bearer {token}"},

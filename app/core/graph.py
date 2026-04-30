@@ -8,18 +8,16 @@ from langgraph.types import interrupt
 from app.config import settings
 from app.core.state import GraphState
 from app.services.rag_service import run_rag
+from app.services.router_service import classify_intent
 from app.services.sql_service import SQLService
 
 sql_service = SQLService()
 
 
 def route_intent(state: GraphState) -> dict:
-    """Keyword-based intent router (stub until Phase 3 LLM router)."""
-    q = state["question"].lower()
-    sql_keywords = ["how many", "count", "total", "sum", "average", "what is the", "show me", "list"]
-    if any(kw in q for kw in sql_keywords):
-        return {"intent": "sql"}
-    return {"intent": "rag"}
+    """LLM-based intent router for sql/rag/hybrid."""
+    intent = classify_intent(state["question"])
+    return {"intent": intent}
 
 
 def generate_sql_node(state: GraphState) -> dict:
