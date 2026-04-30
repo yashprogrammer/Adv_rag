@@ -1,0 +1,13 @@
+# <type>(<scope>): <subject>  [phase-<n>]
+#
+# Types:    feat fix refactor test docs chore build ci perf style
+# Scopes:   security middleware services core api storage models
+#           config eval seed deploy tests docs repo
+#
+# Body — what & why (wrap at 72):
+#
+#
+# Footer — refs (e.g. "Refs IMPLEMENTATION_PLAN.md §X.Y") or
+# BREAKING CHANGE: <description>
+#
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
