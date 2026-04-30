@@ -8,8 +8,10 @@ from loguru import logger
 
 from app.config import settings
 from app.middleware.auth import User, require_admin
+from app.services.query_cache_service import QueryCacheService
 
 router = APIRouter(tags=["admin"])
+query_cache_service = QueryCacheService()
 
 
 async def _ping_postgres() -> bool:
@@ -97,11 +99,21 @@ async def health_check() -> dict[str, Any]:
 
 @router.get("/admin/cache/stats")
 async def cache_stats(user: User = Depends(require_admin)) -> dict:
-    """Return per-cache hit/miss counts (placeholder until Phase 4)."""
+    """Return per-cache hit/miss/set counts."""
+    raw = query_cache_service.stats()
+
+    def _tier(name: str) -> dict:
+        return {
+            "hits": int(raw.get(name, {}).get("hits", 0)),
+            "misses": int(raw.get(name, {}).get("misses", 0)),
+            "sets": int(raw.get(name, {}).get("sets", 0)),
+            "hit_rate": float(raw.get(name, {}).get("hit_rate", 0.0)),
+        }
+
     return {
-        "embedding": {"hits": 0, "misses": 0},
-        "rag": {"hits": 0, "misses": 0},
-        "sql_gen": {"hits": 0, "misses": 0},
-        "sql_result": {"hits": 0, "misses": 0},
-        "intent_router": {"hits": 0, "misses": 0},
+        "embedding": {"hits": 0, "misses": 0, "sets": 0, "hit_rate": 0.0},
+        "rag": _tier("rag_answer"),
+        "sql_gen": _tier("sql_gen"),
+        "sql_result": _tier("sql_result"),
+        "intent_router": _tier("intent"),
     }
