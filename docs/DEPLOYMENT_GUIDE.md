@@ -21,7 +21,7 @@ This guide is the single source of truth for deploying the ADV RAG pipeline to A
 4. [Pre-Deployment: Create AWS Resources](#4-pre-deployment-create-aws-resources)
 5. [Secrets Manager](#5-secrets-manager)
 6. [Docker Build & ECR Push](#6-docker-build--ecr-push)
-7. [Terraform: Deploy Infrastructure](#7-terraform-deploy-infrastructure)
+7. [Terraform: Deploy Infrastructure](#7-cloudformation-deploy-infrastructure)
 8. [Verify Deployment](#8-verify-deployment)
 9. [GitHub Actions CD Setup (OIDC)](#9-github-actions-cd-setup-oidc)
 10. [Troubleshooting](#10-troubleshooting)
@@ -52,14 +52,9 @@ docker --version
 # Expected: Docker version 24.x or higher
 ```
 
-### 1.3 Terraform >= 1.5.0
+### 1.3 AWS CloudFormation
 
-```bash
-terraform -version
-# Expected: Terraform v1.5.x or higher
-```
-
-Install: https://developer.hashicorp.com/terraform/downloads
+No additional tools needed — CloudFormation is managed entirely through the AWS CLI.
 
 ### 1.4 jq
 
@@ -279,91 +274,105 @@ aws ecr describe-images \
 
 ---
 
-## 7. Terraform: Deploy Infrastructure
+## 7. CloudFormation: Deploy Infrastructure
 
-### 7.1 Configure terraform.tfvars
-
-```bash
-cd infra/terraform
-cp terraform.tfvars.example terraform.tfvars
-```
-
-Edit `terraform.tfvars` with your actual values:
-
-```hcl
-project_name = "adv-rag"
-environment  = "prod"
-aws_region   = "us-east-1"
-
-# Networking (from Step 3)
-vpc_id             = "vpc-XXXXXXXXXXXXXXXXX"
-public_subnet_ids  = ["subnet-XXXXXXXXXXXXXXXXX", "subnet-YYYYYYYYYYYYYYYYY"]
-private_subnet_ids = ["subnet-ZZZZZZZZZZZZZZZZZ", "subnet-WWWWWWWWWWWWWWWWW"]
-
-# Container image (from Step 6)
-container_image = "123456789012.dkr.ecr.us-east-1.amazonaws.com/adv-rag-prod-app:latest"
-
-# Secrets Manager ARNs (from Step 4)
-openai_api_key_secret_arn      = "arn:aws:secretsmanager:us-east-1:123456789012:secret:adv-rag/prod/openai-api-key-XXXXXX"
-jwt_secret_secret_arn          = "arn:aws:secretsmanager:us-east-1:123456789012:secret:adv-rag/prod/jwt-secret-XXXXXX"
-database_url_secret_arn        = "arn:aws:secretsmanager:us-east-1:123456789012:secret:adv-rag/prod/database-url-XXXXXX"
-upstash_redis_url_secret_arn   = "arn:aws:secretsmanager:us-east-1:123456789012:secret:adv-rag/prod/upstash-redis-url-XXXXXX"
-upstash_redis_token_secret_arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:adv-rag/prod/upstash-redis-token-XXXXXX"
-tavily_api_key_secret_arn      = "arn:aws:secretsmanager:us-east-1:123456789012:secret:adv-rag/prod/tavily-api-key-XXXXXX"
-
-# Optional overrides
-# ecs_task_cpu    = 2048
-# ecs_task_memory = 16384
-# desired_count   = 1
-# enable_autoscaling = false
-```
-
-### 7.2 Initialize Terraform
+### 7.1 Configure CloudFormation parameters
 
 ```bash
-terraform init
+cd infra/
+cp cloudformation-params.json.example cloudformation-params.json
 ```
 
-### 7.3 Plan
+Edit `cloudformation-params.json` with your actual values:
+
+```json
+{
+  "Parameters": {
+    "ProjectName": "adv-rag",
+    "Environment": "prod",
+    "VpcId": "vpc-XXXXXXXXXXXXXXXXX",
+    "PublicSubnetIds": "subnet-XXXXXXXXXXXXXXXXX,subnet-YYYYYYYYYYYYYYYYY",
+    "PrivateSubnetIds": "subnet-ZZZZZZZZZZZZZZZZZ,subnet-WWWWWWWWWWWWWWWWW",
+    "ContainerImage": "123456789012.dkr.ecr.us-east-1.amazonaws.com/adv-rag-prod-app:latest",
+    "OpenaiApiKeySecretArn": "arn:aws:secretsmanager:us-east-1:123456789012:secret:adv-rag/prod/openai-api-key-XXXXXX",
+    "JwtSecretSecretArn": "arn:aws:secretsmanager:us-east-1:123456789012:secret:adv-rag/prod/jwt-secret-XXXXXX",
+    "DatabaseUrlSecretArn": "arn:aws:secretsmanager:us-east-1:123456789012:secret:adv-rag/prod/database-url-XXXXXX",
+    "UpstashRedisUrlSecretArn": "arn:aws:secretsmanager:us-east-1:123456789012:secret:adv-rag/prod/upstash-redis-url-XXXXXX",
+    "UpstashRedisTokenSecretArn": "arn:aws:secretsmanager:us-east-1:123456789012:secret:adv-rag/prod/upstash-redis-token-XXXXXX",
+    "TavilyApiKeySecretArn": "arn:aws:secretsmanager:us-east-1:123456789012:secret:adv-rag/prod/tavily-api-key-XXXXXX",
+    "GitHubOrg": "your-github-org",
+    "GitHubRepo": "your-repo-name"
+  }
+}
+```
+
+> **Note:** Replace `your-github-org` and `your-repo-name` with your actual GitHub organization and repository name. If you don't want to create the GitHub Actions OIDC role yet, set these to empty strings ` ""`.
+
+### 7.2 Deploy the stack
 
 ```bash
-terraform plan -out=tfplan
+./deploy-cloudformation.sh
 ```
 
-Review the plan carefully. Expected resources:
-- ECR repository
-- ECS cluster + service + task definition (3 containers)
-- ALB + target group + listener
-- EFS filesystem + 3 access points
-- Security groups (ALB, ECS, EFS)
-- CloudWatch log group
-- IAM roles and policies
-- Optional: autoscaling target + policy
+This script:
+1. Validates your parameters file exists
+2. Creates or updates the CloudFormation stack
+3. Waits for deployment to complete
+4. Prints all stack outputs
 
-### 7.4 Apply
+**Manual deployment (if you prefer):**
 
 ```bash
-terraform apply tfplan
+aws cloudformation create-stack \
+  --stack-name adv-rag-prod \
+  --template-body file://cloudformation.yaml \
+  --parameters file://cloudformation-params.json \
+  --capabilities CAPABILITY_IAM \
+  --region us-east-1
+
+# Wait for completion
+aws cloudformation wait stack-create-complete \
+  --stack-name adv-rag-prod \
+  --region us-east-1
 ```
+
+### 7.3 What gets created
+
+The CloudFormation stack provisions:
+- **ECR repository** for the app image
+- **ECS cluster** with FARGATE capacity provider
+- **ECS task definition** with 3 sidecar containers (app, qdrant, postgres)
+- **ECS service** with ALB integration
+- **ALB** with HTTP listener and health checks
+- **EFS filesystem** with 3 access points (app-data, qdrant-data, postgres-data)
+- **Security groups** for ALB, ECS tasks, and EFS
+- **CloudWatch log group** for centralized logging
+- **IAM roles** for ECS execution, task runtime, and GitHub Actions OIDC
+- **Optional:** Auto scaling policy (if enabled)
 
 This takes ~5-10 minutes. Wait for completion.
 
-### 7.5 Capture outputs
+### 7.4 Capture outputs
 
 ```bash
-terraform output
+aws cloudformation describe-stacks \
+  --stack-name adv-rag-prod \
+  --region us-east-1 \
+  --query 'Stacks[0].Outputs[*].[OutputKey,OutputValue]' \
+  --output table
 ```
 
 Save these values:
-- `ecr_repository_url`
-- `ecs_cluster_name`
-- `ecs_service_name`
-- `alb_dns_name`
-- `efs_file_system_id`
-- `efs_access_point_id`
-- `efs_qdrant_access_point_id`
-- `efs_postgres_access_point_id`
-- `cloudwatch_log_group_name`
+- `EcrRepositoryUri`
+- `EcsClusterName`
+- `EcsServiceName`
+- `AlbDnsName`
+- `EfsFileSystemId`
+- `EfsAccessPointAppId`
+- `EfsAccessPointQdrantId`
+- `EfsAccessPointPostgresId`
+- `CloudWatchLogGroupName`
+- `GitHubActionsRoleArn`
 
 ---
 
@@ -385,7 +394,7 @@ Expected: `runningCount == desiredCount == 1`, `status == ACTIVE`
 ### 8.2 Check ALB health
 
 ```bash
-ALB_DNS=$(terraform output -raw alb_dns_name)
+ALB_DNS=$(aws cloudformation describe-stacks --stack-name adv-rag-prod --region us-east-1 --query 'Stacks[0].Outputs[?OutputKey==`AlbDnsName`].OutputValue' --output text)
 echo "ALB URL: http://${ALB_DNS}"
 
 # Health check (public, no auth)
@@ -407,7 +416,7 @@ Expected response:
 ### 8.3 Check logs
 
 ```bash
-aws logs tail "$(terraform output -raw cloudwatch_log_group_name)" --follow --region $AWS_REGION
+aws logs tail "$(aws cloudformation describe-stacks --stack-name adv-rag-prod --region us-east-1 --query 'Stacks[0].Outputs[?OutputKey==`CloudWatchLogGroupName`].OutputValue' --output text)" --follow --region $AWS_REGION
 ```
 
 ### 8.4 Test authentication
@@ -598,8 +607,8 @@ echo "Deployer Role ARN: ${DEPLOYER_ROLE_ARN}"
 | Variable | Value |
 |----------|-------|
 | `AWS_REGION` | `us-east-1` |
-| `ECS_CLUSTER` | Output from `terraform output ecs_cluster_name` |
-| `ECS_SERVICE` | Output from `terraform output ecs_service_name` |
+| `ECS_CLUSTER` | Output from `aws cloudformation describe-stacks --stack-name adv-rag-prod --region us-east-1 --query 'Stacks[0].Outputs[?OutputKey==`EcsClusterName`].OutputValue' --output text` |
+| `ECS_SERVICE` | Output from `aws cloudformation describe-stacks --stack-name adv-rag-prod --region us-east-1 --query 'Stacks[0].Outputs[?OutputKey==`EcsServiceName`].OutputValue' --output text` |
 | `ECS_TASK_FAMILY` | `${PROJECT_NAME}-${ENVIRONMENT}-task` |
 | `ECR_REPOSITORY` | `${PROJECT_NAME}-${ENVIRONMENT}-app` |
 
@@ -611,8 +620,8 @@ gh secret set AWS_ROLE_TO_ASSUME --body "${DEPLOYER_ROLE_ARN}"
 
 # Set variables
 gh variable set AWS_REGION --body "us-east-1"
-gh variable set ECS_CLUSTER --body "$(terraform output -raw ecs_cluster_name)"
-gh variable set ECS_SERVICE --body "$(terraform output -raw ecs_service_name)"
+gh variable set ECS_CLUSTER --body "$(aws cloudformation describe-stacks --stack-name adv-rag-prod --region us-east-1 --query 'Stacks[0].Outputs' -raw ecs_cluster_name)"
+gh variable set ECS_SERVICE --body "$(aws cloudformation describe-stacks --stack-name adv-rag-prod --region us-east-1 --query 'Stacks[0].Outputs' -raw ecs_service_name)"
 gh variable set ECS_TASK_FAMILY --body "${PROJECT_NAME}-${ENVIRONMENT}-task"
 gh variable set ECR_REPOSITORY --body "${PROJECT_NAME}-${ENVIRONMENT}-app"
 ```
@@ -670,12 +679,12 @@ aws iam get-role-policy \
 ```bash
 # Check target health
 aws elbv2 describe-target-health \
-  --target-group-arn "$(terraform output -raw alb_target_group_arn 2>/dev/null || echo 'check terraform state')" \
+  --target-group-arn "$(aws cloudformation describe-stacks --stack-name adv-rag-prod --region us-east-1 --query 'Stacks[0].Outputs[?OutputKey==`AlbTargetGroupArn`].OutputValue' --output text 2>/dev/null || echo 'check cloudformation outputs')" \
   --region $AWS_REGION
 
 # Check security group rules
 aws ec2 describe-security-groups \
-  --group-ids $(terraform output -raw ecs_security_group_id 2>/dev/null || aws ec2 describe-security-groups --filters "Name=group-name,Values=${PROJECT_NAME}-${ENVIRONMENT}-ecs-tasks-sg" --query 'SecurityGroups[0].GroupId' --output text) \
+  --group-ids $(aws ec2 describe-security-groups --filters "Name=group-name,Values=adv-rag-prod-ecs-sg" --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || aws ec2 describe-security-groups --filters "Name=group-name,Values=${PROJECT_NAME}-${ENVIRONMENT}-ecs-tasks-sg" --query 'SecurityGroups[0].GroupId' --output text) \
   --region $AWS_REGION \
   --query 'SecurityGroups[0].IpPermissions'
 ```
@@ -702,7 +711,7 @@ curl -s "http://${ALB_DNS}/admin/health" | python3 -m json.tool
 
 **Diagnose:** Check CloudWatch logs for the app container:
 ```bash
-aws logs tail "$(terraform output -raw cloudwatch_log_group_name)" --follow --region $AWS_REGION
+aws logs tail "$(aws cloudformation describe-stacks --stack-name adv-rag-prod --region us-east-1 --query 'Stacks[0].Outputs[?OutputKey==`CloudWatchLogGroupName`].OutputValue' --output text)" --follow --region $AWS_REGION
 ```
 
 **Common causes:**
@@ -870,7 +879,7 @@ aws ecs wait services-stable \
 echo "Service restarted."
 
 # Verify health
-ALB_DNS=$(terraform output -raw alb_dns_name)
+ALB_DNS=$(aws cloudformation describe-stacks --stack-name adv-rag-prod --region us-east-1 --query 'Stacks[0].Outputs[?OutputKey==`AlbDnsName`].OutputValue' --output text)
 curl -s "http://${ALB_DNS}/admin/health" | python3 -m json.tool
 ```
 
@@ -883,8 +892,8 @@ curl -s "http://${ALB_DNS}/admin/health" | python3 -m json.tool
 ### 16.1 Destroy Terraform-managed resources
 
 ```bash
-cd infra/terraform
-terraform destroy
+cd infra
+aws cloudformation delete-stack --stack-name adv-rag-prod --region us-east-1
 ```
 
 Confirm with `yes`. This destroys:
@@ -948,14 +957,14 @@ aws efs describe-file-systems --creation-token "${PROJECT_NAME}-${ENVIRONMENT}-e
 
 | Goal | Command |
 |------|---------|
-| **Deploy** | `terraform apply` |
-| **Update image** | `docker build` → `docker push` → `terraform apply` (or push to main for CD) |
-| **Check health** | `curl http://$(terraform output -raw alb_dns_name)/admin/health` |
-| **View logs** | `aws logs tail $(terraform output -raw cloudwatch_log_group_name) --follow` |
+| **Deploy** | `./deploy-cloudformation.sh` |
+| **Update image** | `docker build` → `docker push` → `./deploy-cloudformation.sh` (or push to main for CD) |
+| **Check health** | `curl http://$(aws cloudformation describe-stacks --stack-name adv-rag-prod --region us-east-1 --query 'Stacks[0].Outputs[?OutputKey==`AlbDnsName`].OutputValue' --output text)/admin/health` |
+| **View logs** | `aws logs tail $(aws cloudformation describe-stacks --stack-name adv-rag-prod --region us-east-1 --query 'Stacks[0].Outputs[?OutputKey==`CloudWatchLogGroupName`].OutputValue' --output text) --follow` |
 | **Scale to 0** | `aws ecs update-service --desired-count 0` |
 | **Scale to 1** | `aws ecs update-service --desired-count 1` |
 | **Rollback** | `aws ecs update-service --task-definition family:revision` |
-| **Destroy** | `terraform destroy` |
+| **Destroy** | `aws cloudformation delete-stack --stack-name adv-rag-prod --region us-east-1` |
 
 ---
 

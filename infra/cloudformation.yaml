@@ -1,0 +1,761 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  ADV RAG E-commerce Customer Support Copilot.
+  ECS Fargate with 3 sidecar containers (app, qdrant, postgres),
+  ALB, EFS with 3 access points, ECR, CloudWatch, IAM roles.
+  Deployed via CloudFormation.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: adv-rag
+    Description: Project name used in resource naming.
+
+  Environment:
+    Type: String
+    Default: prod
+    Description: Environment name (dev, staging, prod).
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: Existing VPC ID.
+
+  PublicSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Public subnet IDs for ALB and EFS mount targets.
+
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private subnet IDs for ECS tasks.
+
+  ContainerImage:
+    Type: String
+    Description: Container image URI (from ECR).
+    Default: ''
+
+  ContainerPort:
+    Type: Number
+    Default: 8000
+    Description: App container listening port.
+
+  EcsTaskCpu:
+    Type: Number
+    Default: 2048
+    Description: Fargate task CPU units.
+
+  EcsTaskMemory:
+    Type: Number
+    Default: 16384
+    Description: Fargate task memory (MiB).
+
+  DesiredCount:
+    Type: Number
+    Default: 1
+    Description: Desired number of ECS tasks.
+
+  EnableAutoscaling:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Enable ECS service autoscaling.
+
+  AutoscalingMinCapacity:
+    Type: Number
+    Default: 1
+
+  AutoscalingMaxCapacity:
+    Type: Number
+    Default: 4
+
+  AutoscalingTargetCpu:
+    Type: Number
+    Default: 60
+
+  HealthCheckPath:
+    Type: String
+    Default: /admin/health
+    Description: ALB target group health check path.
+
+  LogRetentionDays:
+    Type: Number
+    Default: 14
+
+  OpenaiApiKeySecretArn:
+    Type: String
+    Description: Secrets Manager ARN for OPENAI_API_KEY.
+
+  JwtSecretSecretArn:
+    Type: String
+    Description: Secrets Manager ARN for JWT_SECRET.
+
+  DatabaseUrlSecretArn:
+    Type: String
+    Description: Secrets Manager ARN for DATABASE_URL.
+
+  UpstashRedisUrlSecretArn:
+    Type: String
+    Description: Secrets Manager ARN for UPSTASH_REDIS_URL.
+
+  UpstashRedisTokenSecretArn:
+    Type: String
+    Description: Secrets Manager ARN for UPSTASH_REDIS_TOKEN.
+
+  TavilyApiKeySecretArn:
+    Type: String
+    Description: Secrets Manager ARN for TAVILY_API_KEY.
+
+  GitHubOrg:
+    Type: String
+    Description: GitHub organization (for OIDC role trust).
+    Default: ''
+
+  GitHubRepo:
+    Type: String
+    Description: GitHub repository name (for OIDC role trust).
+    Default: ''
+
+Conditions:
+  HasContainerImage: !Not [!Equals [!Ref ContainerImage, '']]
+  CreateAutoscaling: !Equals [!Ref EnableAutoscaling, 'true']
+  CreateGitHubRole: !And [!Not [!Equals [!Ref GitHubOrg, '']], !Not [!Equals [!Ref GitHubRepo, '']]]
+
+Resources:
+  # ============================================================
+  # ECR Repository
+  # ============================================================
+  EcrRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub '${ProjectName}-${Environment}-app'
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: MUTABLE
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ============================================================
+  # CloudWatch Log Group
+  # ============================================================
+  CloudWatchLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${ProjectName}-${Environment}-app'
+      RetentionInDays: !Ref LogRetentionDays
+
+  # ============================================================
+  # Security Groups
+  # ============================================================
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${ProjectName}-${Environment}-alb-sg'
+      GroupDescription: Allow inbound HTTP to ALB
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - Description: HTTP from internet
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  EcsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${ProjectName}-${Environment}-ecs-sg'
+      GroupDescription: Allow ALB ingress to ECS tasks
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - Description: App port from ALB
+          IpProtocol: tcp
+          FromPort: !Ref ContainerPort
+          ToPort: !Ref ContainerPort
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+        - Description: EFS NFS from ECS tasks
+          IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId: !Ref EcsSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  EfsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${ProjectName}-${Environment}-efs-sg'
+      GroupDescription: Allow NFS from ECS tasks
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - Description: NFS from ECS tasks
+          IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId: !Ref EcsSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ============================================================
+  # EFS File System
+  # ============================================================
+  EfsFileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      CreationToken: !Sub '${ProjectName}-${Environment}-efs'
+      Encrypted: true
+      LifecyclePolicies:
+        - TransitionToIA: AFTER_30_DAYS
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-efs'
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  EfsMountTarget1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EfsFileSystem
+      SubnetId: !Select [0, !Ref PublicSubnetIds]
+      SecurityGroups:
+        - !Ref EfsSecurityGroup
+
+  EfsMountTarget2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EfsFileSystem
+      SubnetId: !Select [1, !Ref PublicSubnetIds]
+      SecurityGroups:
+        - !Ref EfsSecurityGroup
+
+  EfsAccessPointApp:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref EfsFileSystem
+      PosixUser:
+        Uid: 1000
+        Gid: 1000
+      RootDirectory:
+        Path: /app-data
+        CreationInfo:
+          OwnerUid: 1000
+          OwnerGid: 1000
+          Permissions: '0755'
+      Tags:
+        - Key: Name
+          Value: app-data
+
+  EfsAccessPointQdrant:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref EfsFileSystem
+      PosixUser:
+        Uid: 1000
+        Gid: 1000
+      RootDirectory:
+        Path: /qdrant-data
+        CreationInfo:
+          OwnerUid: 1000
+          OwnerGid: 1000
+          Permissions: '0755'
+      Tags:
+        - Key: Name
+          Value: qdrant-data
+
+  EfsAccessPointPostgres:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref EfsFileSystem
+      PosixUser:
+        Uid: 1000
+        Gid: 1000
+      RootDirectory:
+        Path: /postgres-data
+        CreationInfo:
+          OwnerUid: 1000
+          OwnerGid: 1000
+          Permissions: '0755'
+      Tags:
+        - Key: Name
+          Value: postgres-data
+
+  # ============================================================
+  # IAM Roles
+  # ============================================================
+  EcsExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-${Environment}-ecs-execution-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: secrets-manager-read
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref OpenaiApiKeySecretArn
+                  - !Ref JwtSecretSecretArn
+                  - !Ref DatabaseUrlSecretArn
+                  - !Ref UpstashRedisUrlSecretArn
+                  - !Ref UpstashRedisTokenSecretArn
+                  - !Ref TavilyApiKeySecretArn
+        - PolicyName: efs-mount
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - elasticfilesystem:ClientMount
+                  - elasticfilesystem:ClientWrite
+                  - elasticfilesystem:ClientRootAccess
+                Resource: !GetAtt EfsFileSystem.Arn
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  EcsTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-${Environment}-ecs-task-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: efs-access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - elasticfilesystem:ClientMount
+                  - elasticfilesystem:ClientWrite
+                  - elasticfilesystem:ClientRootAccess
+                Resource: !GetAtt EfsFileSystem.Arn
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # GitHub Actions OIDC Role
+  GitHubActionsRole:
+    Type: AWS::IAM::Role
+    Condition: CreateGitHubRole
+    Properties:
+      RoleName: !Sub '${ProjectName}-${Environment}-github-actions-deployer'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub 'arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Sub 'repo:${GitHubOrg}/${GitHubRepo}:*'
+      Policies:
+        - PolicyName: deployer-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ECRAuth
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: '*'
+              - Sid: ECRPushPull
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:PutImage
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                Resource: !GetAtt EcrRepository.Arn
+              - Sid: ECSDeploy
+                Effect: Allow
+                Action:
+                  - ecs:UpdateService
+                  - ecs:DescribeServices
+                  - ecs:DescribeTaskDefinition
+                  - ecs:RegisterTaskDefinition
+                  - ecs:ListTasks
+                  - ecs:DescribeTasks
+                Resource: '*'
+              - Sid: PassRole
+                Effect: Allow
+                Action: iam:PassRole
+                Resource:
+                  - !GetAtt EcsExecutionRole.Arn
+                  - !GetAtt EcsTaskRole.Arn
+              - Sid: ALBDescribe
+                Effect: Allow
+                Action:
+                  - elasticloadbalancing:DescribeLoadBalancers
+                Resource: '*'
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ============================================================
+  # ALB
+  # ============================================================
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-alb'
+      Scheme: internet-facing
+      Type: application
+      Subnets: !Ref PublicSubnetIds
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  AlbTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-tg'
+      Port: !Ref ContainerPort
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !Ref VpcId
+      HealthCheckEnabled: true
+      HealthCheckPath: !Ref HealthCheckPath
+      HealthCheckProtocol: HTTP
+      Matcher:
+        HttpCode: '200-399'
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  AlbListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref AlbTargetGroup
+
+  # ============================================================
+  # ECS Cluster
+  # ============================================================
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub '${ProjectName}-${Environment}-cluster'
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ============================================================
+  # ECS Task Definition (3 containers)
+  # ============================================================
+  EcsTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${ProjectName}-${Environment}-task'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: !Ref EcsTaskCpu
+      Memory: !Ref EcsTaskMemory
+      ExecutionRoleArn: !GetAtt EcsExecutionRole.Arn
+      TaskRoleArn: !GetAtt EcsTaskRole.Arn
+      Volumes:
+        - Name: app-efs
+          EFSVolumeConfiguration:
+            FileSystemId: !Ref EfsFileSystem
+            TransitEncryption: ENABLED
+            AuthorizationConfig:
+              AccessPointId: !Ref EfsAccessPointApp
+              IAM: ENABLED
+        - Name: qdrant-efs
+          EFSVolumeConfiguration:
+            FileSystemId: !Ref EfsFileSystem
+            TransitEncryption: ENABLED
+            AuthorizationConfig:
+              AccessPointId: !Ref EfsAccessPointQdrant
+              IAM: ENABLED
+        - Name: postgres-efs
+          EFSVolumeConfiguration:
+            FileSystemId: !Ref EfsFileSystem
+            TransitEncryption: ENABLED
+            AuthorizationConfig:
+              AccessPointId: !Ref EfsAccessPointPostgres
+              IAM: ENABLED
+      ContainerDefinitions:
+        - Name: app
+          Image: !If [HasContainerImage, !Ref ContainerImage, !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ProjectName}-${Environment}-app:latest']
+          Essential: true
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+              HostPort: !Ref ContainerPort
+              Protocol: tcp
+          MountPoints:
+            - SourceVolume: app-efs
+              ContainerPath: /app/data
+              ReadOnly: false
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CloudWatchLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: app
+          Environment:
+            - Name: DATABASE_URL
+              Value: postgresql://postgres:postgres@localhost:5432/adv_rag
+            - Name: QDRANT_URL
+              Value: http://localhost:6333
+          Secrets:
+            - Name: OPENAI_API_KEY
+              ValueFrom: !Ref OpenaiApiKeySecretArn
+            - Name: JWT_SECRET
+              ValueFrom: !Ref JwtSecretSecretArn
+            - Name: UPSTASH_REDIS_URL
+              ValueFrom: !Ref UpstashRedisUrlSecretArn
+            - Name: UPSTASH_REDIS_TOKEN
+              ValueFrom: !Ref UpstashRedisTokenSecretArn
+            - Name: TAVILY_API_KEY
+              ValueFrom: !Ref TavilyApiKeySecretArn
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - !Sub 'curl -f http://localhost:${ContainerPort}/admin/health || exit 1'
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+          DependsOn:
+            - ContainerName: postgres
+              Condition: HEALTHY
+            - ContainerName: qdrant
+              Condition: HEALTHY
+
+        - Name: qdrant
+          Image: qdrant/qdrant:v1.17.0
+          Essential: true
+          PortMappings:
+            - ContainerPort: 6333
+              HostPort: 6333
+              Protocol: tcp
+            - ContainerPort: 6334
+              HostPort: 6334
+              Protocol: tcp
+          MountPoints:
+            - SourceVolume: qdrant-efs
+              ContainerPath: /qdrant/storage
+              ReadOnly: false
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CloudWatchLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: qdrant
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - 'wget -qO /dev/null http://localhost:6333/healthz || exit 1'
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+
+        - Name: postgres
+          Image: postgres:16
+          Essential: true
+          PortMappings:
+            - ContainerPort: 5432
+              HostPort: 5432
+              Protocol: tcp
+          MountPoints:
+            - SourceVolume: postgres-efs
+              ContainerPath: /var/lib/postgresql/data
+              ReadOnly: false
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CloudWatchLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: postgres
+          Environment:
+            - Name: POSTGRES_USER
+              Value: postgres
+            - Name: POSTGRES_PASSWORD
+              Value: postgres
+            - Name: POSTGRES_DB
+              Value: adv_rag
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - 'pg_isready -U postgres'
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+
+  # ============================================================
+  # ECS Service
+  # ============================================================
+  EcsService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - AlbListener
+    Properties:
+      ServiceName: !Sub '${ProjectName}-${Environment}-service'
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref EcsTaskDefinition
+      DesiredCount: !Ref DesiredCount
+      LaunchType: FARGATE
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups:
+            - !Ref EcsSecurityGroup
+          Subnets: !Ref PrivateSubnetIds
+      LoadBalancers:
+        - TargetGroupArn: !Ref AlbTargetGroup
+          ContainerName: app
+          ContainerPort: !Ref ContainerPort
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ============================================================
+  # Auto Scaling (Optional)
+  # ============================================================
+  ScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Condition: CreateAutoscaling
+    Properties:
+      MaxCapacity: !Ref AutoscalingMaxCapacity
+      MinCapacity: !Ref AutoscalingMinCapacity
+      ResourceId: !Sub 'service/${EcsCluster}/${EcsService}'
+      RoleARN: !Sub 'arn:aws:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService'
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+
+  ScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Condition: CreateAutoscaling
+    Properties:
+      PolicyName: !Sub '${ProjectName}-${Environment}-cpu-scaling'
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: !Ref AutoscalingTargetCpu
+
+Outputs:
+  EcrRepositoryUri:
+    Description: ECR repository URI
+    Value: !GetAtt EcrRepository.RepositoryUri
+
+  EcsClusterName:
+    Description: ECS cluster name
+    Value: !Ref EcsCluster
+
+  EcsServiceName:
+    Description: ECS service name
+    Value: !Ref EcsService
+
+  AlbDnsName:
+    Description: Public DNS name of the ALB
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+
+  EfsFileSystemId:
+    Description: EFS file system ID
+    Value: !Ref EfsFileSystem
+
+  EfsAccessPointAppId:
+    Description: EFS access point ID for app data
+    Value: !Ref EfsAccessPointApp
+
+  EfsAccessPointQdrantId:
+    Description: EFS access point ID for qdrant data
+    Value: !Ref EfsAccessPointQdrant
+
+  EfsAccessPointPostgresId:
+    Description: EFS access point ID for postgres data
+    Value: !Ref EfsAccessPointPostgres
+
+  CloudWatchLogGroupName:
+    Description: CloudWatch log group
+    Value: !Ref CloudWatchLogGroup
+
+  GitHubActionsRoleArn:
+    Description: IAM role ARN for GitHub Actions OIDC
+    Value: !If [CreateGitHubRole, !GetAtt GitHubActionsRole.Arn, 'Not created - provide GitHubOrg and GitHubRepo']
+    Condition: CreateGitHubRole
+
+  HealthCheckUrl:
+    Description: URL to check deployment health
+    Value: !Sub 'http://${ApplicationLoadBalancer.DNSName}/admin/health'

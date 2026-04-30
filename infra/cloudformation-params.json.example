@@ -1,0 +1,28 @@
+{
+  "Parameters": {
+    "ProjectName": "adv-rag",
+    "Environment": "prod",
+    "VpcId": "vpc-XXXXXXXXXXXXXXXXX",
+    "PublicSubnetIds": "subnet-XXXXXXXXXXXXXXXXX,subnet-YYYYYYYYYYYYYYYYY",
+    "PrivateSubnetIds": "subnet-ZZZZZZZZZZZZZZZZZ,subnet-WWWWWWWWWWWWWWWWW",
+    "ContainerImage": "123456789012.dkr.ecr.us-east-1.amazonaws.com/adv-rag-prod-app:latest",
+    "ContainerPort": "8000",
+    "EcsTaskCpu": "2048",
+    "EcsTaskMemory": "16384",
+    "DesiredCount": "1",
+    "EnableAutoscaling": "false",
+    "AutoscalingMinCapacity": "1",
+    "AutoscalingMaxCapacity": "4",
+    "AutoscalingTargetCpu": "60",
+    "HealthCheckPath": "/admin/health",
+    "LogRetentionDays": "14",
+    "OpenaiApiKeySecretArn": "arn:aws:secretsmanager:us-east-1:123456789012:secret:adv-rag/prod/openai-api-key-XXXXXX",
+    "JwtSecretSecretArn": "arn:aws:secretsmanager:us-east-1:123456789012:secret:adv-rag/prod/jwt-secret-XXXXXX",
+    "DatabaseUrlSecretArn": "arn:aws:secretsmanager:us-east-1:123456789012:secret:adv-rag/prod/database-url-XXXXXX",
+    "UpstashRedisUrlSecretArn": "arn:aws:secretsmanager:us-east-1:123456789012:secret:adv-rag/prod/upstash-redis-url-XXXXXX",
+    "UpstashRedisTokenSecretArn": "arn:aws:secretsmanager:us-east-1:123456789012:secret:adv-rag/prod/upstash-redis-token-XXXXXX",
+    "TavilyApiKeySecretArn": "arn:aws:secretsmanager:us-east-1:123456789012:secret:adv-rag/prod/tavily-api-key-XXXXXX",
+    "GitHubOrg": "your-github-org",
+    "GitHubRepo": "your-repo-name"
+  }
+}
