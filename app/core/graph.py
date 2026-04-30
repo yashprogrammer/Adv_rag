@@ -80,7 +80,7 @@ def generate_answer(state: GraphState) -> dict:
         }
 
     # RAG path
-    return run_rag(state["question"], top_k=state.get("flags", {}).get("top_k", 5)).model_dump()
+    return run_rag(state["question"], flags=state.get("flags", {})).model_dump()
 
 
 def finalize(state: GraphState) -> dict:

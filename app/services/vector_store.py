@@ -67,3 +67,54 @@ def search(query_embedding: list[float], top_k: int = 5) -> list[RetrievedChunk]
         )
         for hit in results
     ]
+
+
+def hybrid_search(
+    query_embedding: list[float],
+    query_text: str,
+    top_k: int = 5,
+    rrf_k: int = 60,
+    sparse_top_k: int = 20,
+) -> list[RetrievedChunk]:
+    """Hybrid search: dense (Qdrant) + sparse (TF-IDF) fused with RRF.
+
+    1. Get dense results from Qdrant
+    2. Build sparse index from all Qdrant points (scroll collection)
+    3. Get sparse results from TF-IDF
+    4. Fuse with RRF: score = sum(1 / (rrf_k + rank)) for each result set
+    5. Return top_k fused results sorted by RRF score
+    """
+    from app.services.sparse_vector_service import SparseVectorIndex, fuse_rrf
+
+    # 1. Dense results
+    dense_results = search(query_embedding, top_k=sparse_top_k)
+
+    # 2. Scroll all points
+    client = get_client()
+    all_points, _next_page = client.scroll(
+        collection_name=settings.qdrant_collection,
+        limit=10000,
+        with_payload=True,
+        with_vectors=False,
+    )
+
+    # 3. Build sparse index
+    documents = [
+        {
+            "text": point.payload.get("text", "") if point.payload else "",
+            "source": point.payload.get("source", "") if point.payload else "",
+            "id": str(point.id),
+        }
+        for point in all_points
+    ]
+
+    sparse_index = SparseVectorIndex()
+    sparse_index.fit(documents)
+
+    # 4. Sparse results
+    sparse_results = sparse_index.search(query_text, top_k=sparse_top_k)
+
+    # 5. Fuse and return top_k
+    fused = fuse_rrf([dense_results, sparse_results], rrf_k=rrf_k)
+    return fused[:top_k]
+
