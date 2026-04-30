@@ -127,7 +127,7 @@ async def cache_stats(user: User = Depends(require_admin)) -> dict:
         }
 
     return {
-        "embedding": {"hits": 0, "misses": 0, "sets": 0, "hit_rate": 0.0},
+        "embedding": _tier("embedding"),
         "rag": _tier("rag_answer"),
         "sql_gen": _tier("sql_gen"),
         "sql_result": _tier("sql_result"),

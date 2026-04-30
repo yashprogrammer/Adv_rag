@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 class QueryCacheService:
     """Caches query sub-results by tier with per-tier stats."""
 
-    _TIERS = ("intent", "rag_answer", "sql_gen", "sql_result")
+    _TIERS = ("intent", "rag_answer", "sql_gen", "sql_result", "embedding")
 
     def __init__(self):
         self._redis_client: Any | None = self._build_redis_client()
@@ -154,6 +154,29 @@ class QueryCacheService:
             self.sql_result_key(sql),
             json.dumps(rows),
             settings.cache_ttl_sql_result,
+        )
+
+    def embedding_key(self, text: str) -> str:
+        return self._key("embedding", text)
+
+    def get_embedding(self, text: str) -> list[float] | None:
+        value = self._get("embedding", self.embedding_key(text))
+        if value is None:
+            return None
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                return parsed
+        except json.JSONDecodeError:
+            logger.exception("Invalid embedding cache payload")
+        return None
+
+    def set_embedding(self, text: str, vector: list[float]) -> None:
+        self._set(
+            "embedding",
+            self.embedding_key(text),
+            json.dumps(vector),
+            settings.cache_ttl_embeddings,
         )
 
     def stats(self) -> dict[str, dict[str, float | int]]:

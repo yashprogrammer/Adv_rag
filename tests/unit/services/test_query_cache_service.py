@@ -71,3 +71,20 @@ def test_redis_error_does_not_raise_on_set(monkeypatch) -> None:
 
     svc.set_sql_generation("q", "select 1")
     assert svc.get_sql_generation("q") == "select 1"
+
+
+def test_embedding_get_set_and_stats(monkeypatch) -> None:
+    monkeypatch.setattr("app.services.query_cache_service.settings.upstash_redis_url", "")
+    monkeypatch.setattr("app.services.query_cache_service.settings.upstash_redis_token", "")
+    monkeypatch.setattr("app.services.query_cache_service.settings.cache_ttl_embeddings", 99)
+
+    svc = QueryCacheService()
+    assert svc.get_embedding("hello world") is None
+
+    svc.set_embedding("hello world", [0.1, 0.2, 0.3])
+    assert svc.get_embedding("hello world") == [0.1, 0.2, 0.3]
+
+    stats = svc.stats()
+    assert stats["embedding"]["misses"] == 1
+    assert stats["embedding"]["hits"] == 1
+    assert stats["embedding"]["sets"] == 1

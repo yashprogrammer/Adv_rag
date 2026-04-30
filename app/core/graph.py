@@ -1,5 +1,7 @@
 """LangGraph build function — Phase 1 skeleton with SQL interrupt path."""
 
+import json
+
 import psycopg
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.graph import END, START, StateGraph
@@ -7,6 +9,8 @@ from langgraph.types import interrupt
 
 from app.config import settings
 from app.core.state import GraphState
+from app.security.spotlighting import build_spotlighted_context
+from app.services.llm_service import generate
 from app.services.rag_service import run_rag
 from app.services.router_service import classify_intent
 from app.services.sql_service import SQLService
@@ -18,6 +22,20 @@ def route_intent(state: GraphState) -> dict:
     """LLM-based intent router for sql/rag/hybrid."""
     intent = classify_intent(state["question"])
     return {"intent": intent}
+
+
+def retrieve_rag(state: GraphState) -> dict:
+    """Run RAG retrieval and store chunks/context for later merge."""
+    response = run_rag(state["question"], flags=state.get("flags", {}))
+    return {
+        "retrieved_chunks": response.sources,
+        "spotlighted_context": build_spotlighted_context([
+            type("Chunk", (), {"text": s, "source": s, "score": 0.0})()
+            for s in response.sources
+        ]),
+        "rag_cache_hit": response.cache_hit,
+        "cache_hits": {"rag_answer": response.cache_hit},
+    }
 
 
 def generate_sql_node(state: GraphState) -> dict:
@@ -68,14 +86,15 @@ def generate_answer(state: GraphState) -> dict:
                 "sources": ["database query"],
                 "confidence": 0.9,
             }
-        # Format rows as markdown table
-        import json
         answer = f"Query results:\n```\n{json.dumps(rows, indent=2)}\n```"
         return {
             "final_answer": answer,
             "sources": ["database query"],
             "confidence": 0.9,
         }
+
+    if intent == "hybrid":
+        return _generate_hybrid_answer(state)
 
     # RAG path
     response = run_rag(state["question"], flags=state.get("flags", {}))
@@ -85,6 +104,32 @@ def generate_answer(state: GraphState) -> dict:
         "confidence": response.confidence,
         "rag_cache_hit": response.cache_hit,
         "cache_hits": {"rag_answer": response.cache_hit},
+    }
+
+
+def _generate_hybrid_answer(state: GraphState) -> dict:
+    """Merge SQL rows and RAG chunks into a single coherent answer."""
+    rows = state.get("sql_rows", [])
+    rag_context = state.get("spotlighted_context", "")
+
+    sql_section = ""
+    if rows:
+        sql_section = f"=== Database Query Results ===\n```\n{json.dumps(rows, indent=2)}\n```\n"
+
+    rag_section = f"=== Retrieved Documents ===\n{rag_context}\n" if rag_context else ""
+
+    system = (
+        "You are an AI assistant. Synthesize database query results and "
+        "retrieved documents into a single coherent answer. Cite sources using "
+        "[database query] for SQL results and [source_name] for documents."
+    )
+    user_msg = f"{sql_section}{rag_section}\n\nQuestion: {state['question']}"
+
+    result = generate(system, user_msg)
+    return {
+        "final_answer": result["text"],
+        "sources": ["database query"] + state.get("retrieved_chunks", []),
+        "confidence": 0.85,
     }
 
 
@@ -104,6 +149,7 @@ def build_graph():
     """Build and compile the LangGraph with Postgres checkpointer."""
     builder = StateGraph(GraphState)
     builder.add_node("route_intent", route_intent)
+    builder.add_node("retrieve_rag", retrieve_rag)
     builder.add_node("generate_sql_node", generate_sql_node)
     builder.add_node("request_sql_approval", request_sql_approval)
     builder.add_node("execute_sql", execute_sql)
@@ -114,8 +160,9 @@ def build_graph():
     builder.add_conditional_edges(
         "route_intent",
         lambda s: s.get("intent", "rag"),
-        {"sql": "generate_sql_node", "rag": "generate_answer", "hybrid": "generate_answer"},
+        {"sql": "generate_sql_node", "rag": "generate_answer", "hybrid": "retrieve_rag"},
     )
+    builder.add_edge("retrieve_rag", "generate_sql_node")
     builder.add_edge("generate_sql_node", "request_sql_approval")
     builder.add_edge("request_sql_approval", "execute_sql")
     builder.add_edge("execute_sql", "generate_answer")
