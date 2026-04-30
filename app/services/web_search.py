@@ -2,8 +2,6 @@
 
 import logging
 
-import tavily
-
 from app.config import settings
 from app.models import RetrievedChunk
 
@@ -20,6 +18,8 @@ def search_web(query: str, max_results: int = 5) -> list[RetrievedChunk]:
         raise ValueError("Tavily API key not configured")
 
     try:
+        import tavily
+
         client = tavily.TavilyClient(api_key=settings.tavily_api_key)
         response = client.search(
             query=query,

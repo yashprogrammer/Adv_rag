@@ -103,7 +103,7 @@ def crag_pipeline(
         )
         try:
             web_chunks = search_web(question)
-            return (web_chunks, evaluation, True) if web_chunks else ([], evaluation, False)
+            return (web_chunks, evaluation, True)
         except ValueError:
             logger.warning("Web search triggered but Tavily API key not configured")
             return ([], evaluation, False)
@@ -113,10 +113,10 @@ def crag_pipeline(
     if should_trigger_web_search(evaluation):
         try:
             web_chunks = search_web(question)
-            return (web_chunks, evaluation, True) if web_chunks else (chunks, evaluation, False)
+            return (web_chunks, evaluation, True)
         except ValueError:
             logger.warning("Web search triggered but Tavily API key not configured")
-            return (chunks, evaluation, False)
+            return ([], evaluation, False)
 
     if (
         evaluation.relevance_label == "ambiguous"

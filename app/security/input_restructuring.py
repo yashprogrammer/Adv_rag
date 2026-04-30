@@ -1,54 +1,84 @@
-"""Input moderation and restructuring hooks with safe fallbacks."""
+"""L5: Input restructuring — tiktoken-based truncate or summarize."""
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import logging
+
+from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
-def moderate_input_text(
-    text: str,
-    moderation_fn: Callable[[str], bool] | None = None,
-) -> tuple[bool, str | None]:
-    """Run moderation hook and never fail closed on provider errors."""
-    if moderation_fn is None:
-        return True, None
+def count_tokens(text: str) -> int:
+    """Count tokens using tiktoken if available, otherwise rough word count."""
+    try:
+        import tiktoken
+
+        enc = tiktoken.get_encoding("cl100k_base")
+        return len(enc.encode(text))
+    except Exception:
+        return len(text.split())
+
+
+def truncate_text(text: str, max_tokens: int = 3_000) -> tuple[str, str]:
+    """Truncate text to max_tokens. Returns (truncated, method_label)."""
+    tokens = count_tokens(text)
+    if tokens <= max_tokens:
+        return text, "original"
 
     try:
-        allowed = bool(moderation_fn(text))
+        import tiktoken
+
+        enc = tiktoken.get_encoding("cl100k_base")
+        encoded = enc.encode(text)
+        truncated = enc.decode(encoded[:max_tokens])
+        return truncated, "truncated"
     except Exception:
-        return True, None
-
-    if not allowed:
-        return False, "Input was blocked by moderation policy"
-    return True, None
+        words = text.split()
+        truncated = " ".join(words[:max_tokens])
+        return truncated, "truncated"
 
 
-def restructure_input_text(
-    text: str,
-    restructuring_fn: Callable[[str], str] | None = None,
-) -> str:
-    """Run restructuring hook with original-text fallback."""
-    if restructuring_fn is None:
-        return text
+def summarize_text(text: str, target_tokens: int = 3_000) -> tuple[str, str]:
+    """Greedy sentence selection to fit within target_tokens.
 
-    try:
-        candidate = restructuring_fn(text)
-    except Exception:
-        return text
+    Returns (summary, method_label).
+    """
+    import re
 
-    if isinstance(candidate, str) and candidate:
-        return candidate
-    return text
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    summary_parts: list[str] = []
+    current_tokens = 0
+
+    for sentence in sentences:
+        sentence_tokens = count_tokens(sentence)
+        if current_tokens + sentence_tokens > target_tokens and summary_parts:
+            break
+        summary_parts.append(sentence)
+        current_tokens += sentence_tokens
+
+    return " ".join(summary_parts), "summarized"
 
 
-def apply_input_security_pipeline(
-    text: str,
-    moderation_fn: Callable[[str], bool] | None = None,
-    restructuring_fn: Callable[[str], str] | None = None,
-) -> tuple[bool, str, str | None]:
-    """Apply moderation then restructuring with graceful degradation."""
-    allowed, reason = moderate_input_text(text, moderation_fn=moderation_fn)
-    if not allowed:
-        return False, text, reason
+def restructure_input(text: str) -> tuple[str, str]:
+    """Apply input restructuring based on token count.
 
-    return True, restructure_input_text(text, restructuring_fn=restructuring_fn), None
+    Rules from PRD:
+    - ≤ 3000 tokens: original
+    - 3000–6000 tokens: truncated to 3000
+    - > 6000 tokens: summarized to 3000
+
+    Returns (restructured_text, method_label).
+    """
+    tokens = count_tokens(text)
+    max_input = settings.max_input_tokens
+    reserved = settings.reserved_context_tokens
+    effective_limit = max_input - reserved
+
+    if tokens <= effective_limit:
+        return text, "original"
+
+    if tokens <= effective_limit * 2:
+        return truncate_text(text, effective_limit)
+
+    return summarize_text(text, effective_limit)

@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
-from app.middleware.auth import User, get_current_user
+from app.middleware.auth import User, get_current_user, require_admin
 from app.models import RetrievedChunk
 from app.services.document_processor import DocumentProcessor
 from app.services.embedding_service import embed_texts
@@ -16,7 +16,7 @@ processor = DocumentProcessor()
 @router.post("/documents/upload")
 async def upload_document(
     file: UploadFile = File(...),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
 ) -> dict:
     try:
         ingested = await ingest_pdf_upload(file)
