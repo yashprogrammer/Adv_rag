@@ -9,6 +9,7 @@ from app.services.crag import crag_pipeline
 from app.services.embedding_service import embed_texts
 from app.services.hyde import HyDERetriever
 from app.services.llm_service import generate
+from app.services.query_cache_service import query_cache
 from app.services.reranking import Reranker
 from app.services.self_reflective import reflect_on_answer, should_regenerate
 from app.services.vector_store import hybrid_search, search
@@ -26,6 +27,22 @@ def run_rag(question: str, flags: dict | None = None) -> ChatResponse:
     7. Validate output schema
     """
     flags = flags or {}
+    cache_context = {
+        "search_mode": flags.get("search_mode", "dense"),
+        "enable_hyde": bool(flags.get("enable_hyde", False)),
+        "enable_rerank": bool(flags.get("enable_rerank", True)),
+        "enable_crag": bool(flags.get("enable_crag", settings.crag_enabled_by_default)),
+        "enable_self_reflective": bool(
+            flags.get("enable_self_reflective", settings.self_reflective_enabled_by_default)
+        ),
+        "top_k": int(flags.get("top_k", 5)),
+    }
+    cached = query_cache.get_rag_answer(question, cache_context)
+    if cached is not None:
+        response = ChatResponse(**cached)
+        response.cache_hit = True
+        return response
+
     top_k = flags.get("top_k", 5)
     search_mode = flags.get("search_mode", "dense")
     enable_hyde = flags.get("enable_hyde", False)
@@ -110,4 +127,5 @@ def run_rag(question: str, flags: dict | None = None) -> ChatResponse:
         return generate(system, prompt)["text"]
 
     validated = validate_with_retry(raw, llm_fn=_retry_llm)
+    query_cache.set_rag_answer(question, validated.model_dump(), cache_context)
     return validated

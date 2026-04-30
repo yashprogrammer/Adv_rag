@@ -6,6 +6,7 @@ from typing import Literal
 
 from app.config import settings
 from app.services.llm_service import generate_with_json
+from app.services.query_cache_service import query_cache
 
 Intent = Literal["sql", "rag", "hybrid"]
 
@@ -21,6 +22,31 @@ Respond ONLY with a JSON object in this exact format:
 
 logger = logging.getLogger(__name__)
 
+_DOCUMENT_HINTS = (
+    "elastic-cache",
+    "fast-dllm",
+    "llada",
+    "gsm8k",
+    "gamma",
+    "figure",
+    "table",
+    "paper",
+    "authors",
+    "affiliations",
+    "humaneval",
+    "qkv",
+    "kv cache",
+    "cache update",
+    "sliding window",
+    "block-wise",
+    "diffusion llm",
+)
+
+
+def _looks_like_document_question(question: str) -> bool:
+    lowered = question.lower()
+    return any(hint in lowered for hint in _DOCUMENT_HINTS)
+
 
 def classify_intent(question: str) -> Intent:
     """Classify user question intent using an LLM.
@@ -28,6 +54,14 @@ def classify_intent(question: str) -> Intent:
     Returns one of: "sql", "rag", "hybrid"
     Falls back to "rag" if LLM fails or returns invalid intent.
     """
+    if _looks_like_document_question(question):
+        query_cache.set_intent(question, "rag")
+        return "rag"
+
+    cached = query_cache.get_intent(question)
+    if cached in ("sql", "rag", "hybrid"):
+        return cached  # type: ignore[return-value]
+
     try:
         response = generate_with_json(
             system_prompt=_INTENT_SYSTEM_PROMPT,
@@ -40,6 +74,7 @@ def classify_intent(question: str) -> Intent:
         intent = parsed.get("intent", "")
 
         if intent in ("sql", "rag", "hybrid"):
+            query_cache.set_intent(question, intent)
             return intent  # type: ignore[return-value]
 
         logger.error("Invalid intent returned by LLM: %s", intent)

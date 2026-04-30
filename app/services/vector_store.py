@@ -53,12 +53,25 @@ def upsert_chunks(chunks: list[RetrievedChunk], embeddings: list[list[float]]) -
 def search(query_embedding: list[float], top_k: int = 5) -> list[RetrievedChunk]:
     """Search Qdrant for the top-k most similar chunks."""
     client = get_client()
-    results = client.search(
-        collection_name=settings.qdrant_collection,
-        query_vector=query_embedding,
-        limit=top_k,
-        with_payload=True,
-    )
+    ensure_collection()
+
+    # qdrant-client changed dense search API from `search` to `query_points`
+    # in newer versions. Support both to stay compatible across environments.
+    if hasattr(client, "query_points"):
+        query_result = client.query_points(
+            collection_name=settings.qdrant_collection,
+            query=query_embedding,
+            limit=top_k,
+            with_payload=True,
+        )
+        results = query_result.points
+    else:
+        results = client.search(
+            collection_name=settings.qdrant_collection,
+            query_vector=query_embedding,
+            limit=top_k,
+            with_payload=True,
+        )
     return [
         RetrievedChunk(
             text=hit.payload.get("text", ""),
@@ -117,4 +130,3 @@ def hybrid_search(
     # 5. Fuse and return top_k
     fused = fuse_rrf([dense_results, sparse_results], rrf_k=rrf_k)
     return fused[:top_k]
-

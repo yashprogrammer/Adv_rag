@@ -31,7 +31,15 @@ async def upload_document(
 
     try:
         chunks_meta = processor.process_document(ingested.temp_path)
+        for chunk in chunks_meta:
+            chunk["source"] = ingested.safe_filename
         chunks = [RetrievedChunk(text=c["text"], source=c["source"]) for c in chunks_meta]
+        if not chunks:
+            return {
+                "doc_id": file.filename or ingested.safe_filename,
+                "chunks_indexed": 0,
+                "message": "No extractable text found in document",
+            }
         texts = [c.text for c in chunks]
         embeddings = embed_texts(texts)
         upsert_chunks(chunks, embeddings)

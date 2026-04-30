@@ -70,6 +70,8 @@ async def query(req: QueryRequest, user: User = Depends(get_current_user)) -> Ch
         answer=result.get("final_answer", ""),
         sources=result.get("sources", []),
         confidence=result.get("confidence", 0.0),
+        cache_hit=bool(result.get("rag_cache_hit") or any(result.get("cache_hits", {}).values())),
+        cost_saved=f"${float(result.get('cost_saved_usd', 0.0)):.2f}",
         metadata=ResponseMetadata(route=result.get("intent", "rag")),
     )
 

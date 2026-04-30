@@ -12,6 +12,7 @@ COPY pyproject.toml ./
 RUN uv pip install --system --no-cache torch torchvision \
         --extra-index-url https://download.pytorch.org/whl/cpu
 RUN uv pip install --system --no-cache -e .
+RUN uv pip install --system --no-cache 'psycopg[binary]'
 
 COPY app/ ./app/
 COPY scripts/ ./scripts/

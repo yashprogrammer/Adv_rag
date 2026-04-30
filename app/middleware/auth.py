@@ -26,7 +26,11 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     return bcrypt.checkpw(plain_password.encode("utf-8"), hashed_password.encode("utf-8"))
 
 
-def create_access_token(username: str, expires_delta_seconds: int | None = None) -> str:
+def create_access_token(
+    username: str,
+    expires_delta_seconds: int | None = None,
+    is_admin: bool = False,
+) -> str:
     if expires_delta_seconds is None:
         expires_delta_seconds = settings.jwt_expiration_minutes * 60
     expire = datetime.datetime.now(datetime.UTC) + datetime.timedelta(
@@ -36,6 +40,7 @@ def create_access_token(username: str, expires_delta_seconds: int | None = None)
         "sub": username,
         "exp": expire,
         "iat": datetime.datetime.now(datetime.UTC),
+        "is_admin": is_admin,
     }
     return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
 

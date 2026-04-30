@@ -7,6 +7,7 @@ import psycopg2
 
 from app.config import settings
 from app.services.llm_service import generate
+from app.services.query_cache_service import query_cache
 
 
 def is_select_only(sql: str) -> bool:
@@ -61,6 +62,10 @@ class SQLService:
         Returns:
             dict with "sql" and "explanation" keys.
         """
+        cached = query_cache.get_sql_generation(question)
+        if cached is not None:
+            return {"sql": cached, "explanation": "Loaded from SQL generation cache."}
+
         schema = self._build_schema_context()
         system = (
             "You are a SQL expert. Given a database schema and a question, "
@@ -76,15 +81,21 @@ class SQLService:
             text = "\n".join(text.splitlines()[1:-1]).strip()
 
         data = json.loads(text)
-        return {
+        payload = {
             "sql": data.get("sql", ""),
             "explanation": data.get("explanation", ""),
         }
+        query_cache.set_sql_generation(question, payload["sql"])
+        return payload
 
     def execute_sql(self, sql: str) -> list[dict]:
         """Execute a SELECT query and return rows as dicts."""
         if not is_select_only(sql):
             raise ValueError("Only SELECT statements are allowed")
+
+        cached = query_cache.get_sql_result(sql)
+        if cached is not None:
+            return cached
 
         conn = psycopg2.connect(settings.database_url)
         cur = conn.cursor()
@@ -94,4 +105,6 @@ class SQLService:
         cur.close()
         conn.close()
 
-        return [dict(zip(columns, row, strict=True)) for row in rows]
+        result = [dict(zip(columns, row, strict=True)) for row in rows]
+        query_cache.set_sql_result(sql, result)
+        return result

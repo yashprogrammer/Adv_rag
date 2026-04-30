@@ -81,5 +81,5 @@ async def login(request: Request, body: dict) -> dict:
     if row is None or not verify_password(password, row[0]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    token = create_access_token(username)
+    token = create_access_token(username, is_admin=bool(row[1]))
     return {"token": token}

@@ -78,7 +78,14 @@ def generate_answer(state: GraphState) -> dict:
         }
 
     # RAG path
-    return run_rag(state["question"], flags=state.get("flags", {})).model_dump()
+    response = run_rag(state["question"], flags=state.get("flags", {}))
+    return {
+        "final_answer": response.answer,
+        "sources": response.sources,
+        "confidence": response.confidence,
+        "rag_cache_hit": response.cache_hit,
+        "cache_hits": {"rag_answer": response.cache_hit},
+    }
 
 
 def finalize(state: GraphState) -> dict:

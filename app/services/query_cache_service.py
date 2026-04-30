@@ -47,8 +47,11 @@ class QueryCacheService:
     def intent_key(self, question: str) -> str:
         return self._key("intent", question.strip().lower())
 
-    def rag_answer_key(self, question: str) -> str:
-        return self._key("rag_answer", question.strip())
+    def rag_answer_key(self, question: str, cache_context: dict[str, Any] | None = None) -> str:
+        raw: str | dict[str, Any] = question.strip()
+        if cache_context is not None:
+            raw = {"question": question.strip(), "context": cache_context}
+        return self._key("rag_answer", json.dumps(raw, sort_keys=True) if isinstance(raw, dict) else raw)
 
     def sql_gen_key(self, question: str) -> str:
         return self._key("sql_gen", question.strip())
@@ -101,8 +104,12 @@ class QueryCacheService:
     def set_intent(self, question: str, intent: str) -> None:
         self._set("intent", self.intent_key(question), intent, settings.cache_ttl_intent)
 
-    def get_rag_answer(self, question: str) -> dict[str, Any] | None:
-        value = self._get("rag_answer", self.rag_answer_key(question))
+    def get_rag_answer(
+        self,
+        question: str,
+        cache_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        value = self._get("rag_answer", self.rag_answer_key(question, cache_context))
         if value is None:
             return None
         try:
@@ -111,10 +118,15 @@ class QueryCacheService:
             logger.exception("Invalid rag_answer cache payload")
             return None
 
-    def set_rag_answer(self, question: str, answer_payload: dict[str, Any]) -> None:
+    def set_rag_answer(
+        self,
+        question: str,
+        answer_payload: dict[str, Any],
+        cache_context: dict[str, Any] | None = None,
+    ) -> None:
         self._set(
             "rag_answer",
-            self.rag_answer_key(question),
+            self.rag_answer_key(question, cache_context),
             json.dumps(answer_payload),
             settings.cache_ttl_rag,
         )
@@ -160,3 +172,6 @@ class QueryCacheService:
                     "hit_rate": hit_rate,
                 }
         return snapshot
+
+
+query_cache = QueryCacheService()

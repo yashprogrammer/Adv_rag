@@ -22,11 +22,6 @@ services:
       - "6334:6334"
     volumes:
       - qdrant_data:/qdrant/storage
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
 
   app:
     build:
@@ -34,7 +29,9 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8000:8000"
+    working_dir: /app
     environment:
+      - PYTHONPATH=/app
       - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/adv_rag
       - QDRANT_URL=http://qdrant:6333
       - UPSTASH_REDIS_URL=${UPSTASH_REDIS_URL}
@@ -48,7 +45,7 @@ services:
       postgres:
         condition: service_healthy
       qdrant:
-        condition: service_healthy
+        condition: service_started
     volumes:
       - ./app:/app/app
       - ./scripts:/app/scripts

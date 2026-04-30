@@ -8,10 +8,9 @@ from loguru import logger
 
 from app.config import settings
 from app.middleware.auth import User, require_admin
-from app.services.query_cache_service import QueryCacheService
+from app.services.query_cache_service import query_cache
 
 router = APIRouter(tags=["admin"])
-query_cache_service = QueryCacheService()
 
 
 async def _ping_postgres() -> bool:
@@ -100,7 +99,7 @@ async def health_check() -> dict[str, Any]:
 @router.get("/admin/cache/stats")
 async def cache_stats(user: User = Depends(require_admin)) -> dict:
     """Return per-cache hit/miss/set counts."""
-    raw = query_cache_service.stats()
+    raw = query_cache.stats()
 
     def _tier(name: str) -> dict:
         return {
