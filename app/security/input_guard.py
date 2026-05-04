@@ -21,6 +21,27 @@ def _load_guard() -> Any | None:
 
 
 _SCAN_PROMPT = _load_guard()
+_scanners: list[Any] | None = None
+
+
+def _get_scanners() -> list[Any]:
+    """Lazy-build llm-guard input scanner instances from settings."""
+    global _scanners
+    if _scanners is not None:
+        return _scanners
+
+    from llm_guard.input_scanners import PromptInjection, Toxicity, BanTopics, TokenLimit
+
+    _scanners = [
+        PromptInjection(threshold=settings.prompt_injection_threshold),
+        Toxicity(threshold=settings.toxicity_threshold),
+        BanTopics(
+            topics=["violence", "self-harm", "illegal activities"],
+            threshold=settings.toxicity_threshold,
+        ),
+        TokenLimit(limit=4096),
+    ]
+    return _scanners
 
 
 def scan_input(text: str) -> dict[str, Any]:
@@ -41,16 +62,14 @@ def scan_input(text: str) -> dict[str, Any]:
         }
 
     try:
-        result = _SCAN_PROMPT(
-            text,
-            scanners=["PromptInjection", "Toxicity", "BanTopics", "TokenLimit"],
-            threshold=settings.prompt_injection_threshold,
-        )
+        scanners = _get_scanners()
+        sanitized, is_valid, scores = _SCAN_PROMPT(scanners, text)
+        failed = [name for name, valid in is_valid.items() if not valid]
         return {
-            "is_safe": bool(result.get("is_safe", True)),
-            "failed_checks": list(result.get("failed_checks", [])),
-            "scores": dict(result.get("scores", {})),
-            "sanitized": str(result.get("sanitized", text)),
+            "is_safe": len(failed) == 0,
+            "failed_checks": failed,
+            "scores": dict(scores),
+            "sanitized": str(sanitized),
         }
     except Exception:
         logger.exception("llm-guard scan failed; allowing input")

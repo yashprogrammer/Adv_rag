@@ -293,12 +293,12 @@ flowchart LR
 ### Installation in 5 Steps
 
 ```bash
-# 1️⃣ Create virtual environment
-python -m venv .venv
+# 1️⃣ Create & activate virtual environment
+uv venv
 source .venv/bin/activate
 
 # 2️⃣ Install dependencies
-pip install -e ".[dev]"
+uv pip install -e ".[dev]"
 
 # 3️⃣ Configure environment
 cp .env.example .env
