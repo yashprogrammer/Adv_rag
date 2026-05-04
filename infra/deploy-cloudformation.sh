@@ -21,16 +21,29 @@ echo "Params:   $PARAMS_FILE"
 echo "Region:   $AWS_REGION"
 echo ""
 
+# Convert {"Parameters": {"Key": "Value"}} format to AWS CLI array format
+# and write to a temp file
+TMP_PARAMS=$(mktemp)
+python3 -c "
+import json, sys
+with open('$PARAMS_FILE') as f:
+    data = json.load(f)
+params = data.get('Parameters', data)
+output = [{'ParameterKey': k, 'ParameterValue': str(v)} for k, v in params.items()]
+json.dump(output, sys.stdout)
+" > "$TMP_PARAMS"
+
 # Check if stack exists
 if aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
     echo "Stack exists. Updating..."
     aws cloudformation update-stack \
         --stack-name "$STACK_NAME" \
         --template-body "file://$TEMPLATE_FILE" \
-        --parameters "file://$PARAMS_FILE" \
-        --capabilities CAPABILITY_IAM \
+        --parameters "file://$TMP_PARAMS" \
+        --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
         --region "$AWS_REGION" || {
             echo "No changes to update."
+            rm -f "$TMP_PARAMS"
             exit 0
         }
 else
@@ -38,10 +51,12 @@ else
     aws cloudformation create-stack \
         --stack-name "$STACK_NAME" \
         --template-body "file://$TEMPLATE_FILE" \
-        --parameters "file://$PARAMS_FILE" \
-        --capabilities CAPABILITY_IAM \
+        --parameters "file://$TMP_PARAMS" \
+        --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
         --region "$AWS_REGION"
 fi
+
+rm -f "$TMP_PARAMS"
 
 echo ""
 echo "Waiting for stack to complete..."

@@ -1,6 +1,10 @@
 """LangGraph build function — Phase 1 skeleton with SQL interrupt path."""
 
+import datetime
+import decimal
 import json
+import uuid
+from typing import Any
 
 import psycopg
 from langgraph.checkpoint.postgres import PostgresSaver
@@ -16,6 +20,30 @@ from app.services.router_service import classify_intent
 from app.services.sql_service import SQLService
 
 sql_service = SQLService()
+
+
+def _safe_json_default(obj: Any) -> Any:
+    """Fallback serializer for non-JSON-native types."""
+    if isinstance(obj, datetime.datetime):
+        return obj.isoformat()
+    if isinstance(obj, datetime.date):
+        return obj.isoformat()
+    if isinstance(obj, datetime.time):
+        return obj.isoformat()
+    if isinstance(obj, datetime.timedelta):
+        return str(obj)
+    if isinstance(obj, decimal.Decimal):
+        return float(obj)
+    if isinstance(obj, uuid.UUID):
+        return str(obj)
+    if isinstance(obj, bytes):
+        return obj.decode("utf-8", errors="replace")
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
+def _safe_json_dumps(obj: Any, **kwargs: Any) -> str:
+    """json.dumps with a safe fallback for exotic types."""
+    return json.dumps(obj, default=_safe_json_default, **kwargs)
 
 
 def route_intent(state: GraphState) -> dict:
@@ -86,7 +114,7 @@ def generate_answer(state: GraphState) -> dict:
                 "sources": ["database query"],
                 "confidence": 0.9,
             }
-        answer = f"Query results:\n```\n{json.dumps(rows, indent=2)}\n```"
+        answer = f"Query results:\n```\n{_safe_json_dumps(rows, indent=2)}\n```"
         return {
             "final_answer": answer,
             "sources": ["database query"],
@@ -114,7 +142,7 @@ def _generate_hybrid_answer(state: GraphState) -> dict:
 
     sql_section = ""
     if rows:
-        sql_section = f"=== Database Query Results ===\n```\n{json.dumps(rows, indent=2)}\n```\n"
+        sql_section = f"=== Database Query Results ===\n```\n{_safe_json_dumps(rows, indent=2)}\n```\n"
 
     rag_section = f"=== Retrieved Documents ===\n{rag_context}\n" if rag_context else ""
 

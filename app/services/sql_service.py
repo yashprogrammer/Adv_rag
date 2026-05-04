@@ -1,13 +1,41 @@
 """SQL service — lightweight Text2SQL using LLM with schema context."""
 
+import datetime
+import decimal
 import json
 import re
+import uuid
+from typing import Any
 
 import psycopg2
 
 from app.config import settings
 from app.services.llm_service import generate
 from app.services.query_cache_service import query_cache
+
+
+def _serialize_value(value: Any) -> Any:
+    """Convert non-JSON-serializable types to strings."""
+    if isinstance(value, datetime.datetime):
+        return value.isoformat()
+    if isinstance(value, datetime.date):
+        return value.isoformat()
+    if isinstance(value, datetime.time):
+        return value.isoformat()
+    if isinstance(value, datetime.timedelta):
+        return str(value)
+    if isinstance(value, decimal.Decimal):
+        return float(value)
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+def _serialize_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Serialize all values in a row dict for JSON compatibility."""
+    return {k: _serialize_value(v) for k, v in row.items()}
 
 
 def is_select_only(sql: str) -> bool:
@@ -105,6 +133,6 @@ class SQLService:
         cur.close()
         conn.close()
 
-        result = [dict(zip(columns, row, strict=True)) for row in rows]
+        result = [_serialize_row(dict(zip(columns, row, strict=True))) for row in rows]
         query_cache.set_sql_result(sql, result)
         return result

@@ -57,7 +57,9 @@ class QueryCacheService:
         return self._key("sql_gen", question.strip())
 
     def sql_result_key(self, sql: str) -> str:
-        return self._key("sql_result", " ".join(sql.split()).strip().lower())
+        # v2 suffix invalidates old cache entries that may contain
+        # non-JSON-serializable types (datetime, Decimal, UUID, etc.)
+        return self._key("sql_result:v2", " ".join(sql.split()).strip().lower())
 
     def _record(self, tier: str, field: str) -> None:
         with self._lock:

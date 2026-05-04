@@ -202,34 +202,8 @@ def _badge(label: str, color: str = "blue") -> str:
     """
 
 
-def _render_response_card(status: int, payload: Any) -> None:
-    """Render a nice response card instead of raw JSON dump."""
-    if not isinstance(payload, dict):
-        st.code(json.dumps(payload, indent=2), language="json")
-        return
-
-    # Top status banner
-    if 200 <= status < 300:
-        st.success("✅ Request succeeded")
-    else:
-        st.error(f"❌ Request failed — HTTP {status}")
-        st.code(json.dumps(payload, indent=2), language="json")
-        return
-
-    # If there is a pending SQL block, show it prominently
-    pending_sql = payload.get("pending_sql")
-    if pending_sql:
-        st.session_state["pending_sql"] = pending_sql
-        st.warning("⏳ SQL approval required — see the **SQL Approval** section below.")
-        with st.container(border=True):
-            st.markdown("**🗄️ Generated SQL**")
-            st.code(pending_sql.get("sql", ""), language="sql")
-            st.caption(f"query_id: `{pending_sql.get('query_id', '')}`")
-            if pending_sql.get("explanation"):
-                st.info(pending_sql["explanation"])
-        return
-
-    # Normal answer card
+def _render_answer_card(payload: dict[str, Any]) -> None:
+    """Render the answer portion of a response (no status banner)."""
     answer = payload.get("answer", "")
     sources = payload.get("sources", [])
     confidence = payload.get("confidence", 0.0)
@@ -262,6 +236,41 @@ def _render_response_card(status: int, payload: Any) -> None:
 
         with st.expander("🔍 Metadata & Raw Response", expanded=False):
             st.json(payload)
+
+
+def _render_pending_sql_card(pending_sql: dict[str, Any]) -> None:
+    """Render a pending SQL approval card."""
+    st.warning("⏳ SQL approval required — go to the **SQL Approval** tab to review.")
+    with st.container(border=True):
+        st.markdown("**🗄️ Generated SQL**")
+        st.code(pending_sql.get("sql", ""), language="sql")
+        st.caption(f"query_id: `{pending_sql.get('query_id', '')}`")
+        if pending_sql.get("explanation"):
+            st.info(pending_sql["explanation"])
+
+
+def _render_response_card(status: int, payload: Any) -> None:
+    """Render a nice response card instead of raw JSON dump."""
+    if not isinstance(payload, dict):
+        st.code(json.dumps(payload, indent=2), language="json")
+        return
+
+    # Top status banner
+    if 200 <= status < 300:
+        st.success("✅ Request succeeded")
+    else:
+        st.error(f"❌ Request failed — HTTP {status}")
+        st.code(json.dumps(payload, indent=2), language="json")
+        return
+
+    # If there is a pending SQL block, show it prominently
+    pending_sql = payload.get("pending_sql")
+    if pending_sql:
+        st.session_state["pending_sql"] = pending_sql
+        _render_pending_sql_card(pending_sql)
+        return
+
+    _render_answer_card(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -363,14 +372,82 @@ def _upload_section(base_url: str) -> None:
         return
 
     uploaded = st.file_uploader("Choose a PDF", type=["pdf"], key="pdf_uploader")
-    if uploaded and st.button("🚀 Upload & Index", use_container_width=True, key="btn_upload"):
+
+    if uploaded is None:
+        st.caption("Select a PDF above to see upload options.")
+        return
+
+    # File info card
+    size_kb = len(uploaded.getvalue()) / 1024
+    with st.container(border=True):
+        c1, c2, c3 = st.columns([2, 1, 1])
+        with c1:
+            st.markdown(f"**📄 {uploaded.name}**")
+        with c2:
+            st.markdown(f"`{size_kb:.1f} KB`")
+        with c3:
+            st.markdown("`PDF ✅`")
+
+    # First-run warning
+    st.info(
+        "⏱️ **First upload may take 1–3 minutes** — Docling downloads OCR/layout models (~400 MB) on first use. "
+        "Subsequent uploads are typically under 10 seconds.",
+        icon="⏳",
+    )
+
+    if st.button("🚀 Upload & Index", use_container_width=True, key="btn_upload"):
         files = {"file": (uploaded.name, uploaded.getvalue(), "application/pdf")}
-        with st.spinner("Parsing, chunking, embedding, upserting…"):
-            status, payload = _request(
-                "POST", base_url, "/documents/upload",
-                token=token, files=files,
-            )
-        _render_response_card(status, payload)
+
+        with st.status("Indexing document…", expanded=True) as status:
+            st.write("📡 **Step 1/3** — Sending file to API…")
+
+            try:
+                resp = requests.request(
+                    method="POST",
+                    url=f"{base_url.rstrip('/')}/documents/upload",
+                    headers={"Authorization": f"Bearer {token}"},
+                    files=files,
+                    timeout=600,
+                )
+                status_code = resp.status_code
+                payload = _safe_json(resp)
+            except requests.exceptions.Timeout:
+                status.update(label="⏱️ Upload timed out", state="error", expanded=True)
+                st.error(
+                    "The upload timed out after 10 minutes. This usually means Docling is still downloading models.\n\n"
+                    "**What to do:**\n"
+                    "1. Check the API server logs — you should see Docling download progress\n"
+                    "2. Wait for the download to finish (one-time only)\n"
+                    "3. Try uploading again — it will be fast after models are cached"
+                )
+                return
+            except requests.exceptions.ConnectionError:
+                status.update(label="❌ Connection failed", state="error", expanded=True)
+                st.error("Could not connect to the API. Is the server running at the configured base URL?")
+                return
+
+            if status_code in (200, 201) and isinstance(payload, dict):
+                chunks = payload.get("chunks_indexed", 0)
+                page_count = payload.get("page_count")
+                doc_id = payload.get("doc_id", uploaded.name)
+
+                st.write(f"✅ **Step 2/3** — Parsed {chunks} chunk(s)" + (f" from {page_count} page(s)" if page_count else ""))
+                st.write("✅ **Step 3/3** — Embeddings created & vectors upserted to Qdrant")
+                status.update(label=f"🎉 Indexed {chunks} chunks successfully", state="complete")
+
+                with st.container(border=True):
+                    st.markdown(f"**🎉 Document Indexed**")
+                    cols = st.columns([3, 1, 1])
+                    with cols[0]:
+                        st.markdown(f"`{doc_id}`")
+                    with cols[1]:
+                        st.metric("Chunks", chunks)
+                    with cols[2]:
+                        st.metric("Pages", page_count or "—")
+                    st.caption("The document is now searchable via the Query tab.")
+            else:
+                status.update(label=f"❌ Upload failed (HTTP {status_code})", state="error", expanded=True)
+                _render_response_card(status_code, payload)
 
 
 def _query_section(base_url: str) -> None:
@@ -379,6 +456,26 @@ def _query_section(base_url: str) -> None:
     if not token:
         st.info("Login first to use query endpoints.")
         return
+
+    # --- Persisted results from previous runs --------------------------------
+    last_result = st.session_state.get("last_query_result")
+    if last_result and isinstance(last_result, dict):
+        with st.container(border=True):
+            st.markdown("**📌 Last Query Result**")
+            st.caption(f"Question: `{last_result.get('question', '—')}`")
+            _render_answer_card(last_result["payload"])
+        if st.button("🗑️ Dismiss result", key="dismiss_query_result"):
+            st.session_state.pop("last_query_result", None)
+            st.rerun()
+        st.divider()
+
+    pending = st.session_state.get("pending_sql")
+    if pending and isinstance(pending, dict):
+        st.info(
+            f"⏳ You have a pending SQL approval (query_id: `{pending.get('query_id', '')}`). "
+            "Go to the **SQL Approval** tab to approve or reject it.",
+            icon="🗄️",
+        )
 
     # Use-case presets
     st.markdown("**🎯 Use Case Presets** — pick one to auto-fill settings:")
@@ -481,6 +578,24 @@ def _query_section(base_url: str) -> None:
             )
         _render_response_card(status, payload)
 
+        # Persist completed results (not pending SQL) so they survive tab switches
+        if status == 200 and isinstance(payload, dict) and not payload.get("pending_sql"):
+            st.session_state["last_query_result"] = {
+                "question": question,
+                "payload": payload,
+            }
+
+        # Track in session history
+        if status == 200 and isinstance(payload, dict):
+            history = st.session_state.get("query_history", [])
+            history.append({
+                "question": question,
+                "route": (payload.get("metadata") or {}).get("route", "rag"),
+                "confidence": payload.get("confidence", 0.0),
+                "cache_hit": payload.get("cache_hit", False),
+            })
+            st.session_state["query_history"] = history[-20:]
+
 
 def _sql_approval_section(base_url: str) -> None:
     st.header("🗄️ SQL Approval")
@@ -490,6 +605,24 @@ def _sql_approval_section(base_url: str) -> None:
     if not token:
         st.info("Login first.")
         return
+
+    # --- Show previously approved / rejected result --------------------------
+    last_sql = st.session_state.get("last_sql_result")
+    if last_sql and isinstance(last_sql, dict):
+        action = last_sql.get("action", "approved")
+        label = "✅ Approved Result" if action == "approved" else "❌ Rejected Result"
+        with st.container(border=True):
+            st.markdown(f"**{label}**")
+            st.caption(f"query_id: `{last_sql.get('query_id', '—')}`")
+            if action == "approved":
+                _render_answer_card(last_sql["payload"])
+            else:
+                st.markdown("_SQL query was rejected._")
+        if st.button("🗑️ Dismiss result", key="dismiss_sql_result"):
+            st.session_state.pop("last_sql_result", None)
+            st.rerun()
+        st.divider()
+
     if not pending:
         st.info("No pending SQL block. Ask a data question (e.g. *How many orders last month?*) to trigger Text2SQL.")
         return
@@ -511,7 +644,12 @@ def _sql_approval_section(base_url: str) -> None:
                         json_body={"query_id": pending.get("query_id"), "approved": True},
                     )
                 _render_response_card(status, payload)
-                if 200 <= status < 300:
+                if 200 <= status < 300 and isinstance(payload, dict):
+                    st.session_state["last_sql_result"] = {
+                        "query_id": pending.get("query_id"),
+                        "action": "approved",
+                        "payload": payload,
+                    }
                     st.session_state.pop("pending_sql", None)
                     st.rerun()
         with c_reject:
@@ -524,6 +662,11 @@ def _sql_approval_section(base_url: str) -> None:
                     )
                 _render_response_card(status, payload)
                 if 200 <= status < 300:
+                    st.session_state["last_sql_result"] = {
+                        "query_id": pending.get("query_id"),
+                        "action": "rejected",
+                        "payload": {},
+                    }
                     st.session_state.pop("pending_sql", None)
                     st.rerun()
 

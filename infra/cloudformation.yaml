@@ -121,22 +121,6 @@ Conditions:
 
 Resources:
   # ============================================================
-  # ECR Repository
-  # ============================================================
-  EcrRepository:
-    Type: AWS::ECR::Repository
-    Properties:
-      RepositoryName: !Sub '${ProjectName}-${Environment}-app'
-      ImageScanningConfiguration:
-        ScanOnPush: true
-      ImageTagMutability: MUTABLE
-      Tags:
-        - Key: Project
-          Value: !Ref ProjectName
-        - Key: Environment
-          Value: !Ref Environment
-
-  # ============================================================
   # CloudWatch Log Group
   # ============================================================
   CloudWatchLogGroup:
@@ -181,11 +165,6 @@ Resources:
           FromPort: !Ref ContainerPort
           ToPort: !Ref ContainerPort
           SourceSecurityGroupId: !Ref AlbSecurityGroup
-        - Description: EFS NFS from ECS tasks
-          IpProtocol: tcp
-          FromPort: 2049
-          ToPort: 2049
-          SourceSecurityGroupId: !Ref EcsSecurityGroup
       SecurityGroupEgress:
         - IpProtocol: '-1'
           CidrIp: 0.0.0.0/0
@@ -201,12 +180,6 @@ Resources:
       GroupName: !Sub '${ProjectName}-${Environment}-efs-sg'
       GroupDescription: Allow NFS from ECS tasks
       VpcId: !Ref VpcId
-      SecurityGroupIngress:
-        - Description: NFS from ECS tasks
-          IpProtocol: tcp
-          FromPort: 2049
-          ToPort: 2049
-          SourceSecurityGroupId: !Ref EcsSecurityGroup
       SecurityGroupEgress:
         - IpProtocol: '-1'
           CidrIp: 0.0.0.0/0
@@ -216,23 +189,25 @@ Resources:
         - Key: Environment
           Value: !Ref Environment
 
+  EfsSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EfsSecurityGroup
+      IpProtocol: tcp
+      FromPort: 2049
+      ToPort: 2049
+      SourceSecurityGroupId: !Ref EcsSecurityGroup
+      Description: NFS from ECS tasks
+
   # ============================================================
   # EFS File System
   # ============================================================
   EfsFileSystem:
     Type: AWS::EFS::FileSystem
     Properties:
-      CreationToken: !Sub '${ProjectName}-${Environment}-efs'
       Encrypted: true
       LifecyclePolicies:
         - TransitionToIA: AFTER_30_DAYS
-      Tags:
-        - Key: Name
-          Value: !Sub '${ProjectName}-${Environment}-efs'
-        - Key: Project
-          Value: !Ref ProjectName
-        - Key: Environment
-          Value: !Ref Environment
 
   EfsMountTarget1:
     Type: AWS::EFS::MountTarget
@@ -250,6 +225,38 @@ Resources:
       SecurityGroups:
         - !Ref EfsSecurityGroup
 
+  EfsMountTarget3:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EfsFileSystem
+      SubnetId: !Select [2, !Ref PublicSubnetIds]
+      SecurityGroups:
+        - !Ref EfsSecurityGroup
+
+  EfsMountTarget4:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EfsFileSystem
+      SubnetId: !Select [0, !Ref PrivateSubnetIds]
+      SecurityGroups:
+        - !Ref EfsSecurityGroup
+
+  EfsMountTarget5:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EfsFileSystem
+      SubnetId: !Select [1, !Ref PrivateSubnetIds]
+      SecurityGroups:
+        - !Ref EfsSecurityGroup
+
+  EfsMountTarget6:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EfsFileSystem
+      SubnetId: !Select [2, !Ref PrivateSubnetIds]
+      SecurityGroups:
+        - !Ref EfsSecurityGroup
+
   EfsAccessPointApp:
     Type: AWS::EFS::AccessPoint
     Properties:
@@ -263,9 +270,6 @@ Resources:
           OwnerUid: 1000
           OwnerGid: 1000
           Permissions: '0755'
-      Tags:
-        - Key: Name
-          Value: app-data
 
   EfsAccessPointQdrant:
     Type: AWS::EFS::AccessPoint
@@ -280,26 +284,20 @@ Resources:
           OwnerUid: 1000
           OwnerGid: 1000
           Permissions: '0755'
-      Tags:
-        - Key: Name
-          Value: qdrant-data
 
   EfsAccessPointPostgres:
     Type: AWS::EFS::AccessPoint
     Properties:
       FileSystemId: !Ref EfsFileSystem
       PosixUser:
-        Uid: 1000
-        Gid: 1000
+        Uid: 999
+        Gid: 999
       RootDirectory:
         Path: /postgres-data
         CreationInfo:
-          OwnerUid: 1000
-          OwnerGid: 1000
+          OwnerUid: 999
+          OwnerGid: 999
           Permissions: '0755'
-      Tags:
-        - Key: Name
-          Value: postgres-data
 
   # ============================================================
   # IAM Roles
@@ -412,7 +410,7 @@ Resources:
                   - ecr:PutImage
                   - ecr:GetDownloadUrlForLayer
                   - ecr:BatchGetImage
-                Resource: !GetAtt EcrRepository.Arn
+                Resource: !Sub 'arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ProjectName}-${Environment}-app'
               - Sid: ECSDeploy
                 Effect: Allow
                 Action:
@@ -524,6 +522,9 @@ Resources:
       Memory: !Ref EcsTaskMemory
       ExecutionRoleArn: !GetAtt EcsExecutionRole.Arn
       TaskRoleArn: !GetAtt EcsTaskRole.Arn
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+        CpuArchitecture: ARM64
       Volumes:
         - Name: app-efs
           EFSVolumeConfiguration:
@@ -565,6 +566,8 @@ Resources:
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: app
           Environment:
+            - Name: PYTHONPATH
+              Value: /app
             - Name: DATABASE_URL
               Value: postgresql://postgres:postgres@localhost:5432/adv_rag
             - Name: QDRANT_URL
@@ -592,7 +595,7 @@ Resources:
             - ContainerName: postgres
               Condition: HEALTHY
             - ContainerName: qdrant
-              Condition: HEALTHY
+              Condition: START
 
         - Name: qdrant
           Image: qdrant/qdrant:v1.17.0
@@ -614,18 +617,10 @@ Resources:
               awslogs-group: !Ref CloudWatchLogGroup
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: qdrant
-          HealthCheck:
-            Command:
-              - CMD-SHELL
-              - 'wget -qO /dev/null http://localhost:6333/healthz || exit 1'
-            Interval: 30
-            Timeout: 5
-            Retries: 3
-            StartPeriod: 60
-
         - Name: postgres
           Image: postgres:16
           Essential: true
+          User: '999:999'
           PortMappings:
             - ContainerPort: 5432
               HostPort: 5432
@@ -717,7 +712,7 @@ Resources:
 Outputs:
   EcrRepositoryUri:
     Description: ECR repository URI
-    Value: !GetAtt EcrRepository.RepositoryUri
+    Value: !Ref ContainerImage
 
   EcsClusterName:
     Description: ECS cluster name

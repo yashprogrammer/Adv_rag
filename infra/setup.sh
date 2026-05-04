@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-command AWS provisioning script for ADV RAG.
-# This script creates the prerequisite AWS resources that Terraform consumes.
-# Run this BEFORE `terraform apply`.
+# This script creates the prerequisite AWS resources that CloudFormation consumes.
+# Run this BEFORE `./deploy-cloudformation.sh`.
 
 set -euo pipefail
 
