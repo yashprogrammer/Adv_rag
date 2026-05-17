@@ -1,4 +1,10 @@
-"""SQL service — lightweight Text2SQL using LLM with schema context."""
+"""SQL service — lightweight Text2SQL using LLM with K8s operational schema context.
+
+Translates natural-language questions about clusters, pods, incidents, alerts,
+deployments, nodes, and on-call logs into safe PostgreSQL SELECT queries.
+The schema is introspected at runtime from information_schema so this service
+is schema-agnostic; no hard-coded table or column names appear here.
+"""
 
 import datetime
 import decimal
@@ -85,7 +91,10 @@ class SQLService:
         return self._schema_context
 
     def generate_sql(self, question: str) -> dict:
-        """Generate SQL from a natural language question.
+        """Generate SQL from a natural language question about K8s operational data.
+
+        Handles questions such as: cluster incident counts, pod status breakdowns,
+        average MTTR by severity, top on-call engineers by response time, etc.
 
         Returns:
             dict with "sql" and "explanation" keys.

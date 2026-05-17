@@ -1,4 +1,4 @@
-"""LLM-based intent router for classifying user questions."""
+"""LLM-based intent router for classifying Kubernetes IT-Operations user questions."""
 
 import json
 import logging
@@ -10,11 +10,11 @@ from app.services.query_cache_service import query_cache
 
 Intent = Literal["sql", "rag", "hybrid"]
 
-_INTENT_SYSTEM_PROMPT = """You are an intent classifier for an e-commerce customer support AI.
+_INTENT_SYSTEM_PROMPT = """You are an intent classifier for a Kubernetes IT-Operations and SRE AI assistant.
 Classify the user question into exactly one of these categories:
-- "sql": Questions about numerical data, counts, totals, sums, averages, or specific facts stored in a database (e.g., "how many customers", "what is the average order value", "total revenue last month")
-- "rag": Questions about policies, procedures, troubleshooting, or general knowledge that would be found in documents (e.g., "what is the return policy", "how do I reset my password", "shipping timeframes")
-- "hybrid": Questions that mix both numerical data and policy/knowledge (e.g., "how many customers returned items last month and what is the return policy")
+- "sql": Questions about numerical data, counts, totals, sums, averages, or specific operational facts stored in a database (e.g., "how many P1 incidents last quarter", "average MTTR for network incidents", "which cluster has the most CrashLoopBackOff pods", "pods in the production namespace")
+- "rag": Questions about concepts, procedures, troubleshooting steps, or general Kubernetes knowledge found in documentation or runbooks (e.g., "how to scale a deployment", "what is a StatefulSet", "kubectl rollback procedure", "P1 incident escalation process")
+- "hybrid": Questions that require both operational data from the database AND conceptual knowledge from documentation (e.g., "how many image pull failure incidents occurred last month and what are the remediation steps")
 
 Respond ONLY with a JSON object in this exact format:
 {"intent": "sql"} or {"intent": "rag"} or {"intent": "hybrid"}

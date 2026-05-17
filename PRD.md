@@ -1,4 +1,4 @@
-# PRD — ADV RAG: E-commerce Customer Support Copilot
+# PRD — ADV RAG: Kubernetes IT-Operations Copilot
 
 > **Status:** Draft, ready for kickoff.
 > **Scope source:** `IMPLEMENTATION_PLAN.md` (§§0–13) — 32 decisions ratified across 4 grilling rounds. This PRD does not re-derive those decisions; it states them as fixed inputs.
@@ -9,18 +9,18 @@
 
 ## Problem Statement
 
-Support agents at an e-commerce company answer customer questions that span two fundamentally different data shapes:
+Site-reliability and platform engineers operating Kubernetes clusters answer questions that span two fundamentally different data shapes:
 
-1. **Structured records** — *"How many enterprise customers do we have in Germany?"*, *"What's the total refund amount issued last week?"*, *"Show me customer #4521's order history."* These live in Postgres tables and require SQL.
-2. **Unstructured policies, manuals, FAQs** — *"What's our return policy for opened items?"*, *"How do I escalate a Tier-2 ticket?"*, *"Which warranty applies to product X?"* These live in PDFs and markdown documents.
+1. **Structured operational records** — *"Which cluster had the most P1 incidents last month?"*, *"Show me all pods in a CrashLoopBackOff state right now."*, *"What's the mean time to recovery for the prod-us-east cluster this quarter?"* These live in operational Postgres tables (clusters, nodes, pods, deployments, incidents, alerts, oncall_logs) and require SQL.
+2. **Unstructured runbooks, architecture docs, and official references** — *"How does a Kubernetes Deployment handle rolling updates?"*, *"What's the recommended resource-request ratio for a Node?"*, *"Walk me through debugging a CrashLoopBackOff."* These live in the official Kubernetes documentation and internal runbooks.
 
-A naïve approach forces agents to context-switch between admin panels, SQL clients, and SharePoint — slow, error-prone, and expensive to train new hires on. A naïve LLM RAG either misses the structured questions entirely (no SQL) or hallucinates specifics (no grounding). Worse, an LLM endpoint exposed to support agents creates new attack surfaces — prompt injection, jailbreaks, PII leakage, runaway cost — that a typical web-app security stack does not cover.
+A naïve approach forces engineers to context-switch between `kubectl`, Grafana dashboards, Confluence, and the k8s.io docs — slow during an incident, error-prone under pressure, and expensive for new SREs to ramp on. A naïve LLM RAG either misses the structured operational questions entirely (no SQL) or hallucinates specifics (no grounding). Worse, an LLM endpoint exposed to ops teams creates new attack surfaces — prompt injection, jailbreaks, PII leakage, runaway cost — that a typical web-app security stack does not cover.
 
-Beyond the product problem, there is a **secondary purpose**: this codebase is a teaching artifact. The git history, repo structure, and incremental build phases must be legible to another engineer studying how a production-grade RAG system is composed from advanced retrieval, caching, security, and deployment patterns.
+Beyond the product problem, there is a **secondary purpose**: this codebase is a teaching artifact. The knowledge base is deliberately constructed with a **95% noise / 5% signal ratio** (see [Knowledge Base Design Philosophy](#knowledge-base-design-philosophy)) to force every advanced RAG technique to prove its worth. The git history, repo structure, and incremental build phases must be legible to another engineer studying how a production-grade RAG system is composed.
 
 ## Solution
 
-A single FastAPI service ("ADV RAG") that, given an authenticated natural-language question from a support agent, runs the question through 9 composed security layers, classifies its intent (SQL / RAG / HYBRID), retrieves from the right data source(s) with advanced techniques (HyDE, hybrid dense+sparse search with RRF fusion, cross-encoder reranking), grades its own retrievals (CRAG) and answers (Self-RAG), falls back to live web search when company docs are inadequate, caches at five tiers to keep p50 latency under 500ms on warm paths, and serves the result as schema-validated JSON with auto-redacted PII and explicit source citations.
+A single FastAPI service ("ADV RAG") that, given an authenticated natural-language question from an SRE or platform engineer, runs the question through 9 composed security layers, classifies its intent (SQL / RAG / HYBRID), retrieves from the right data source(s) with advanced techniques (HyDE, hybrid dense+sparse search with RRF fusion, cross-encoder reranking), grades its own retrievals (CRAG) and answers (Self-RAG), falls back to live web search when internal docs are inadequate, caches at five tiers to keep p50 latency under 500ms on warm paths, and serves the result as schema-validated JSON with auto-redacted PII and explicit source citations.
 
 Orchestration is a **LangGraph state graph** — router, retrieval, grader, generator, reflector, and SQL-approval interrupt are nodes; persistence is a Postgres checkpointer; SQL approval is a native `interrupt()` instead of an application-level state dance.
 
@@ -41,7 +41,7 @@ flowchart TB
     subgraph FargateTask["ECS Fargate Task (single task)"]
         API[FastAPI :8000<br/>uvicorn 1 worker]
         Qdrant[(Qdrant<br/>dense + sparse vectors)]
-        PG[(Postgres<br/>e-commerce + users + langgraph_*)]
+        PG[(Postgres<br/>k8s-ops + users + langgraph_*)]
 
         API <-->|localhost:6333| Qdrant
         API <-->|localhost:5432| PG
@@ -56,6 +56,7 @@ flowchart TB
         S3[(S3<br/>doc dedup cache)]
         SM[Secrets Manager]
     end
+
 
     API <-->|HTTPS| OpenAI
     API <-->|HTTPS| Tavily
@@ -108,38 +109,38 @@ flowchart TB
 
 ### Authentication, access control, abuse prevention
 
-1. As a support agent, I want to register a username/password, so that I can be issued a JWT to call the API.
-2. As a support agent, I want to log in and receive a JWT, so that subsequent API calls authenticate me.
-3. As a support agent, I want my JWT to expire after 60 minutes, so that a stolen token has a bounded blast radius.
+1. As an SRE, I want to register a username/password, so that I can be issued a JWT to call the API.
+2. As an SRE, I want to log in and receive a JWT, so that subsequent API calls authenticate me.
+3. As an SRE, I want my JWT to expire after 60 minutes, so that a stolen token has a bounded blast radius.
 4. As any user, I want unauthenticated calls to protected endpoints to fail with `401`, so that the system never serves data to anonymous callers.
 5. As a system operator, I want a per-user sliding-window rate limit (default 20 req/min), so that one compromised account can't flood the LLM bill.
 6. As a system operator, I want per-IP rate limits on `/auth/login` (5/min) and `/auth/register` (3/hour), so that brute-force attacks are stalled before the bcrypt round.
 7. As a system operator, I want a per-user daily token budget (default 100k tokens/day, capped pre-LLM with input + 1000-token output ceiling), so that a single user can't burn through the OpenAI budget in one afternoon.
-8. As a support agent, I want a clear error message when I exhaust my budget (*"You have N tokens remaining today; this request estimated to use M"*), so that I know whether to wait until tomorrow or request a raise.
+8. As an SRE, I want a clear error message when I exhaust my budget (*"You have N tokens remaining today; this request estimated to use M"*), so that I know whether to wait until tomorrow or request a raise.
 9. As an admin, I want admin-only endpoints (`/admin/cache/stats`) gated by an `is_admin` column on the users table, so that demo agents can't see operational telemetry.
 10. As a system, I want `/admin/health` to remain publicly accessible (no auth), so that ALB health checks and external monitoring can probe liveness.
 
 ### Asking questions — SQL path
 
-11. As a support agent, I want to ask *"How many enterprise customers in Germany?"* in plain English, so that I don't have to remember which table or column to query.
-12. As a support agent, I want the system to show me the generated SQL before executing it, so that I can sanity-check it against my mental model.
-13. As a support agent, I want to explicitly approve the SQL via a separate endpoint call, so that the LLM cannot blast destructive queries against production data.
-14. As a support agent, I want to reject a generated SQL, so that I can rephrase the question and try again without consuming a wrong-result.
-15. As a support agent, I want SELECT result rows returned in a structured shape, so that the UI can render a table.
+11. As an SRE, I want to ask *"Which cluster had the most P1 incidents last month?"* in plain English, so that I don't have to remember which table or column to query.
+12. As an SRE, I want the system to show me the generated SQL before executing it, so that I can sanity-check it against my mental model.
+13. As an SRE, I want to explicitly approve the SQL via a separate endpoint call, so that the LLM cannot blast destructive queries against production data.
+14. As an SRE, I want to reject a generated SQL, so that I can rephrase the question and try again without consuming a wrong-result.
+15. As an SRE, I want SELECT result rows returned in a structured shape, so that the UI can render a table.
 16. As a system, I want only SELECT statements to be cacheable (DML excluded), so that mutated state never serves stale results.
 17. As a system, I want generated SQL cached for 24 hours (`sql_gen` cache), so that a popular dashboard-style question doesn't re-pay LLM cost on every refresh.
 18. As a system, I want SELECT result rows cached for 15 minutes (`sql_result` cache), so that database load stays bounded under repeat traffic.
-19. As a support agent, I want a SQL execution failure to surface a clear error (not "Internal Server Error"), so that I can tell whether to retry or escalate.
+19. As an SRE, I want a SQL execution failure to surface a clear error (not "Internal Server Error"), so that I can tell whether to retry or escalate.
 
 ### Asking questions — RAG path
 
-20. As a support agent, I want to ask *"What's our return policy for opened items?"* and get an answer with cited PDF source, so that I can quote the policy back to the customer with provenance.
-21. As a support agent, I want every RAG answer to include a confidence score (0.0–1.0), so that I know when to double-check vs. trust.
-22. As a support agent, I want hybrid search (dense + sparse + RRF fusion) by default, so that questions containing rare strings (order IDs, error codes) retrieve correctly even when semantic embedding underweights them.
-23. As an experienced agent, I want to enable cross-encoder reranking for hard questions, so that the final top-5 chunks are jointly scored for relevance.
-24. As an experienced agent, I want to enable HyDE for vague questions, so that the LLM generates 3 hypothetical answer-shaped passages whose embeddings retrieve more accurately.
-25. As a support agent, I want to enable CRAG-style grading, so that if the retrieved docs aren't actually relevant, the system falls back to live web search rather than forcing a guess.
-26. As a support agent, I want Self-RAG reflection on hard questions, so that if the first answer isn't well-grounded, the system refines the query and retrieves again (bounded to 2 retries).
+20. As an SRE, I want to ask *"How does a Kubernetes Deployment handle rolling updates?"* and get an answer with cited source (K8s docs or runbook), so that I can trust the guidance with clear provenance.
+21. As an SRE, I want every RAG answer to include a confidence score (0.0–1.0), so that I know when to double-check vs. trust — critical during an active incident.
+22. As an SRE, I want hybrid search (dense + sparse + RRF fusion) by default, so that questions containing exact K8s terms (`kubectl rollout`, `CrashLoopBackOff`, `PodDisruptionBudget`) retrieve correctly even when semantic embedding underweights them.
+23. As an experienced SRE, I want to enable cross-encoder reranking for hard questions, so that the final top-5 chunks are jointly scored for relevance and noise docs are demoted.
+24. As an experienced SRE, I want to enable HyDE for vague questions, so that the LLM generates 3 hypothetical answer-shaped passages whose embeddings retrieve the right K8s doc despite vocabulary mismatch.
+25. As an SRE, I want to enable CRAG-style grading, so that if the retrieved docs aren't actually relevant (noise docs retrieved instead of the K8s signal), the system falls back to live web search rather than forcing a guess.
+26. As an SRE, I want Self-RAG reflection on hard questions, so that if the first answer isn't well-grounded, the system refines the query and retrieves again (bounded to 2 retries).
 27. As a system, I want the Self-RAG loop strictly bounded by `MAX_REFLECTION_RETRIES`, so that a stubborn question never produces an infinite cost cascade.
 28. As a system operator, I want Tavily failures to return `502` (not silently degrade), so that web-fallback outages are loudly visible rather than masked.
 29. As a system, I want full RAG answers cached for 1 hour keyed by `sha256(question.lower()) + flag-bitmap`, so that repeat questions return in <500ms with `cache_hit=true`.
@@ -147,13 +148,13 @@ flowchart TB
 
 ### Asking questions — HYBRID path
 
-31. As a support agent, I want to ask *"Show me the top 5 customers by revenue and the SLA we've promised them"*, and have the system run SQL + RAG in parallel and merge into one coherent answer, so that I don't have to manually stitch two queries.
-32. As a support agent, I want HYBRID answers to cite both data sources (e.g. *"per [orders table]"* and *"per [sla.pdf]"*), so that I can verify each claim against its source.
+31. As an SRE, I want to ask *"Show me all P1 incidents on the prod-us-east cluster and the recommended remediation steps for each alert type"*, and have the system run SQL + RAG in parallel and merge into one coherent answer, so that I don't have to manually stitch two queries during an incident.
+32. As an SRE, I want HYBRID answers to cite both data sources (e.g. *"per [incidents table]"* and *"per [k8s-troubleshooting-guide.pdf]"*), so that I can verify each claim against its source.
 33. As a system, I want HYBRID merge to be a single LLM call with both contexts, so that the answer is internally consistent rather than two disconnected paragraphs.
 
 ### Document ingestion
 
-34. As an admin, I want to upload a PDF via `POST /documents/upload`, so that the next RAG query can answer from it.
+34. As an admin, I want to upload a K8s runbook or architecture doc via `POST /documents/upload`, so that the next RAG query can answer from it.
 35. As a system, I want uploads validated by MIME type AND magic bytes (`%PDF`), so that a renamed `.exe` cannot pass as a PDF.
 36. As a system, I want uploaded filenames sanitized (no `../`, no special chars), so that path traversal is impossible.
 37. As a system, I want a 10MB upload size limit enforced, so that a single upload can't OOM the parser.
@@ -175,11 +176,11 @@ flowchart TB
 47. As a system, I want llm-guard's `PromptInjection` ML scanner (threshold 0.75) to block semantically-rephrased injection that escapes regex, so that *"Disregard the above"* and other paraphrases still fail.
 48. As a system, I want llm-guard's `Toxicity` and `BanTopics` to block abusive or off-policy input, so that the LLM never even sees inputs that are clearly out of scope.
 49. As a system, I want a curated jailbreak corpus (DAN, role-play, prompt-leak, indirect injection via uploaded PDF, multi-turn escalation) regression-tested in CI, so that any future code change that opens a previously-closed jailbreak fails the build.
-50. As a system, I want the indirect-injection payload deliberately seeded in `seed/docs/returns-sop.pdf` to never influence answers, so that the spotlighting + system-prompt defenses are demonstrably effective.
+50. As a system, I want the indirect-injection payload deliberately seeded in `seed/docs/k8s-runbook-sop.pdf` to never influence answers, so that the spotlighting + system-prompt defenses are demonstrably effective.
 
 ### Caching observability
 
-51. As a support agent, I want every response to include `cache_hit: bool` and `cost_saved: "$0.05"`, so that I can see when the system is fast and free.
+51. As an SRE, I want every response to include `cache_hit: bool` and `cost_saved: "$0.05"`, so that I can see when the system is fast and free.
 52. As an admin, I want `GET /admin/cache/stats` to return per-cache hit/miss counts, so that I can tell which cache tiers are pulling their weight.
 53. As an admin, I want cache TTLs configurable via env vars (`CACHE_TTL_*`), so that I can shorten the RAG answer TTL after a doc upload without redeploying.
 
@@ -188,7 +189,7 @@ flowchart TB
 54. As a system operator, I want structured JSON logs to stdout in prod (controlled by `LOG_JSON=true`), so that CloudWatch Logs Insights can parse and query them.
 55. As a system operator, I want each security-layer rejection logged with the layer name and the rejection reason, so that "your bot won't answer me" tickets resolve in seconds.
 56. As a system operator, I want `/admin/health` to ping every dependency (Qdrant, Postgres, Upstash, OpenAI, Tavily) and report each, so that ALB takes a degraded task out of rotation.
-57. As a system operator, I want the eval harness runnable via `make eval` against a 50-question Ragas seed set, so that I can re-measure quality manually before each phase tag.
+57. As a system operator, I want the eval harness runnable via `make eval` against a 50-question Ragas K8s seed set (spanning RAG, SQL, and HYBRID query types), so that I can re-measure quality manually before each phase tag.
 
 ### LangGraph orchestration
 
@@ -259,7 +260,7 @@ flowchart LR
 - **LangGraph orchestrates** the `/query` pipeline. Security middleware stays *outside* the graph (stateless gates). Routing, retrieval, grading, generation, reflection, SQL approval, HYBRID merge all live *inside* the graph.
 - **`PostgresSaver` checkpointer** for graph state — not Redis. Q25's pending-queries Redis dict is superseded by graph state + `interrupt()`.
 - **Qdrant** sidecar for vectors with dual vectors (dense 1536-d + sparse BM25-style hashed tokens) and native `Fusion.RRF`.
-- **Postgres** sidecar for both Vanna's e-commerce schema and the LangGraph `langgraph_*` tables. Caveat: Postgres-on-EFS is unofficial; acceptable for a portfolio demo, swap to RDS for production.
+- **Postgres** sidecar for both Vanna's K8s operational schema and the LangGraph `langgraph_*` tables. Caveat: Postgres-on-EFS is unofficial; acceptable for a portfolio demo, swap to RDS for production.
 - **Upstash Redis** (HTTP REST) for the 4-tier query cache, sliding-window rate limit, and token budget. Separate concern from graph checkpointing.
 - **S3 (prod) / local FS (dev)** for SHA-256-keyed document dedup cache, behind a `StorageBackend` ABC.
 
@@ -320,8 +321,8 @@ LangGraph fan-out from `route_intent` to both SQL and RAG branches; both termina
 
 ### Build phases (plan §3)
 
-- **Phase 0** — security baseline (auth, rate limit, budget, input/output validation, hardened prompt, spotlighting wrapper).
-- **Phase 1** — skeleton (FastAPI, Postgres + Qdrant compose, Vanna wrapper, naïve RAG, **LangGraph wired with stub `route_intent → generate_answer`**).
+- **Phase 0** — security baseline (auth, rate limit, budget, input/output validation, hardened K8s-domain system prompt, spotlighting wrapper).
+- **Phase 1** — skeleton (FastAPI, Postgres + Qdrant compose, Vanna wrapper, naïve RAG, **LangGraph wired with stub `route_intent → generate_answer`**); K8s operational schema seeded.
 - **Phase 2** — retrieval quality (sparse vectors, RRF, rerank, HyDE).
 - **Phase 3** — self-correction (CRAG node + Tavily, Self-RAG cyclic edge, LLM intent router).
 - **Phase 4** — caching + harden (5-tier cache, llm-guard, content moderation, PDF security pipeline).
@@ -335,7 +336,59 @@ Conventional Commits with `[phase-N]` suffix; atomic commits; `.gitmessage` temp
 
 ### Domain content (addenda row 32)
 
-5 synthesized policy PDFs in `seed/docs/`: `refund-policy.pdf`, `shipping-policy.pdf`, `warranty.pdf`, `returns-sop.pdf`, `faq.pdf`. PDFs are deliberately consistent with `seed/postgres_seed.sql` (e.g. `shipping_days` column matches the shipping-policy text). `returns-sop.pdf` contains a **deliberate hidden indirect-injection payload** in a footer paragraph; `seed/docs/README.md` documents this so future maintainers don't misread it.
+The knowledge base is assembled by `scripts/data_pipeline/` and has a deliberate **95% noise / 5% signal** structure:
+
+| Category | Source | Count | Size | Format |
+|----------|--------|-------|------|--------|
+| Signal (true docs) | Kubernetes official documentation (kubernetes.io) | ~50 docs | ~30 MB | PDF/HTML/MD |
+| Noise (distractor docs) | Random PDFs/DOCX/TXT/HTML from `github.com/tpn/pdfs` | ~950 docs | ~120 MB | Mixed |
+| SQL operational DB | Synthetic K8s ops data (clusters, nodes, pods, incidents…) | 7 tables | ~20 MB | Postgres |
+
+**Signal docs** cover: core K8s concepts, workload management (Deployments, StatefulSets, DaemonSets), networking (Services, Ingress, CNI), storage (PV/PVC, StorageClass), security (RBAC, PSP, NetworkPolicy), observability (metrics-server, audit logs), and troubleshooting runbooks.
+
+**Noise docs** are deliberately unrelated (academic papers, legal docs, old technical manuals). They are indexed without labeling so the retrieval system has no prior on which docs are relevant — it must earn signal retrieval through technique.
+
+One seed runbook (`seed/docs/k8s-runbook-sop.pdf`) contains a **deliberate hidden indirect-injection payload** in a footer paragraph; `seed/docs/README.md` documents this so future maintainers don't misread it.
+
+### Knowledge Base Design Philosophy
+
+> *"If your corpus is 95% noise, every retrieval technique has to prove its worth."*
+
+The noisy corpus is the central design decision of this project as a teaching artifact. Here is why each advanced RAG technique becomes **essential** rather than optional with this ratio:
+
+```mermaid
+flowchart TB
+    subgraph Corpus["Knowledge Base (~170 MB)"]
+        Signal["5% Signal\n~50 K8s official docs\n~30 MB"]
+        Noise["95% Noise\n~950 random docs\n~120 MB"]
+        SQL["Synthetic SQL DB\n7 tables, ~20 MB\nclusters / nodes / pods\ndeployments / incidents\nalerts / oncall_logs"]
+    end
+
+    subgraph Techniques["RAG Techniques — Why Each Matters"]
+        HyDE["HyDE\nShort kubectl queries get buried\nin noise — hypothetical answer\nbridges vocabulary gap"]
+        Rerank["Re-ranking\nBi-encoder pulls noise;\ncross-encoder must\nrescue the signal"]
+        CRAG["CRAG\nMost retrievals return noise\n→ grading + web fallback\nbecomes critical path"]
+        SelfRAG["Self-RAG\nGeneral K8s knowledge needs\nno retrieval at all — system\nlearns when to skip"]
+        Hybrid["Hybrid Search\nBM25 catches exact K8s terms\n(kubectl, CrashLoopBackOff);\ndense catches semantics"]
+        Text2SQL["Text2SQL\nOps questions need the SQL DB\nnot documents"]
+    end
+
+    Signal -->|retrieved by| HyDE
+    Signal -->|rescued by| Rerank
+    Noise -->|filtered by| CRAG
+    Signal -->|skipped when not needed| SelfRAG
+    Signal & Noise -->|jointly searched| Hybrid
+    SQL -->|queried by| Text2SQL
+```
+
+| Technique | Why 95% noise forces it |
+|-----------|------------------------|
+| **HyDE** | Short K8s queries (`kubectl rollout status`) get buried in noise; hypothetical answer bridges vocabulary gap |
+| **Re-ranking** | Bi-encoder retrieval pulls noise docs; cross-encoder must rescue the signal from the top-20 pool |
+| **CRAG** | Most naive retrievals are noisy → relevance grading + web fallback becomes the critical path, not an edge case |
+| **Self-RAG** | Some queries (general K8s knowledge) need no retrieval; system learns to skip retrieval when confidence is high |
+| **Hybrid Search** | BM25 catches exact K8s terms like `kubectl`, `PodDisruptionBudget`; dense catches conceptual semantics |
+| **Text2SQL** | Operational questions ("Which cluster had most P1 incidents?") need the SQL DB, not any document |
 
 ### Postgres `users` schema (addenda)
 
@@ -344,7 +397,23 @@ users(id SERIAL PK, username VARCHAR(64) UNIQUE NOT NULL, password_hash TEXT NOT
       is_admin BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMPTZ NOT NULL DEFAULT now())
 ```
 
-Bcrypt(12) for hashing. Two demo users seeded: `agent@demo.local` (regular) and `admin@demo.local` (`is_admin=true`).
+Bcrypt(12) for hashing. Two demo users seeded: `sre@demo.local` (regular) and `admin@demo.local` (`is_admin=true`).
+
+### Postgres K8s operational schema (addenda)
+
+Synthetic operational data generated by `scripts/data_pipeline/` and seeded via `scripts/seed_db.py`. All data is synthesized — no real production cluster data.
+
+```
+clusters(id, name, region, provider, k8s_version, node_count, status, created_at)
+nodes(id, cluster_id FK, name, role, instance_type, cpu_cores, memory_gb, status, joined_at)
+pods(id, node_id FK, namespace, name, image, cpu_request, memory_request, status, created_at, last_restart)
+deployments(id, cluster_id FK, namespace, name, replicas_desired, replicas_ready, strategy, updated_at)
+incidents(id, cluster_id FK, severity, title, status, started_at, resolved_at, mttr_minutes)
+alerts(id, cluster_id FK, node_id FK, alert_name, severity, fired_at, resolved_at, labels JSONB)
+oncall_logs(id, incident_id FK, engineer, action, notes, logged_at)
+```
+
+This schema supports the canonical demo queries: P1 incident counts by cluster, MTTR trends, pod restart hotspots, alert frequency by severity, and oncall workload distribution.
 
 ## Testing Decisions
 
@@ -392,8 +461,8 @@ Concretely:
 ### Security regression suite (`tests/security/`)
 
 - 10+ jailbreak templates (DAN, "ignore previous", role-play, prompt-leak, multi-turn escalation) — each one is blocked at L1, L2, or L7 with the rejection layer captured in the test assertion.
-- Indirect injection: the deliberate payload in `seed/docs/returns-sop.pdf` does not influence answers to legitimate queries.
-- PII redaction: a query that retrieves a customer record returns a response with email auto-redacted to `[REDACTED_EMAIL]`.
+- Indirect injection: the deliberate payload in `seed/docs/k8s-runbook-sop.pdf` does not influence answers to legitimate K8s queries.
+- PII redaction: a query that retrieves an oncall log entry returns a response with engineer email auto-redacted to `[REDACTED_EMAIL]`.
 - Magic-byte mismatch: upload a renamed `.exe` with `application/pdf` MIME → `422`.
 - Path traversal: filename containing `../../../etc/passwd` is sanitized.
 
@@ -410,7 +479,7 @@ This project follows the layer-organized pattern from `llm-security` for `tests/
 - `pytest` + `pytest-asyncio` for tests.
 - `ruff format` + `ruff check` + `mypy app/` blocking in pre-commit and CI.
 - Coverage target ≥80% on `app/services/` and `app/security/`.
-- Ragas eval (`make eval`) is **not** wired into CI — runs manually before each phase tag (decision Q30). Acceptance thresholds: `faithfulness ≥ 0.85`, `context_precision ≥ 0.75` on the 50-question seed.
+- Ragas eval (`make eval`) is **not** wired into CI — runs manually before each phase tag (decision Q30). Acceptance thresholds: `faithfulness ≥ 0.85`, `context_precision ≥ 0.75` on the 50-question K8s seed set.
 
 ## Out of Scope
 
@@ -475,13 +544,13 @@ At ~1000 queries/day and ~100 doc uploads/day with 50%+ cache hit rate, monthly 
 
 - All Phase 0–5 acceptance tests pass.
 - `pytest` green; coverage ≥80% on `services/` and `security/`.
-- Ragas eval on the 50-question seed: `faithfulness ≥ 0.85`, `context_precision ≥ 0.75`.
+- Ragas eval on the 50-question K8s seed: `faithfulness ≥ 0.85`, `context_precision ≥ 0.75`.
 - Manual red-team suite (10+ jailbreak templates): zero successes.
 - AWS deployment passes its own acceptance tests (`/admin/health` OK after CD, EFS data survives task replacement, secret rotation works).
-- `README.md` covers quick-start, feature flag matrix, security layers, cost frame.
-- Demo script: 5 representative `curl` calls covering SQL, RAG, HYBRID, CRAG-with-web-fallback, jailbreak-blocked.
+- `README.md` covers quick-start, feature flag matrix, security layers, cost frame, and data pipeline instructions (`scripts/data_pipeline/`).
+- Demo script: 5 representative `curl` calls covering SQL (K8s incident query), RAG (K8s concept lookup), HYBRID (incident + remediation), CRAG-with-web-fallback, jailbreak-blocked.
 - Git history reads as a teaching artifact: every commit Conventional + phase-tagged, every phase boundary tagged, `CHANGELOG.md` current, ADRs for non-obvious choices.
 
 ### Submission
 
-Once the repo + GitHub remote are created during the first-commit checklist (`IMPLEMENTATION_PLAN.md` §9), this PRD's body becomes the description of the kickoff GitHub issue (`gh issue create --title "ADV RAG: E-commerce Customer Support Copilot" --body-file PRD.md`). Subsequent phase issues link back to this one as their parent.
+Once the repo + GitHub remote are created during the first-commit checklist (`IMPLEMENTATION_PLAN.md` §9), this PRD's body becomes the description of the kickoff GitHub issue (`gh issue create --title "ADV RAG: Kubernetes IT-Operations Copilot" --body-file PRD.md`). Subsequent phase issues link back to this one as their parent.
