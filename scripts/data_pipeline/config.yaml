@@ -1,0 +1,130 @@
+# =============================================================================
+# Data Pipeline Configuration
+# scripts/data_pipeline/config.yaml
+#
+# Tweak sample sizes, seeds, and paths here without touching any Python code.
+# All paths are relative to the project root (My_project/).
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Corpus composition
+# ---------------------------------------------------------------------------
+corpus:
+  # Number of "noise" documents to sample from tpn/pdfs (best-effort target).
+  # The actual count may be lower if the size cap below is reached first.
+  noise_count: 950
+  # HARD CEILING on the total size of the noisy corpus (MB).
+  # Sampling stops as soon as this budget is exhausted, even if noise_count
+  # has not been met. Keeps total dataset under ~1 GB.
+  noise_max_total_mb: 800
+  # Number of "true" (signal) Kubernetes documents to keep
+  true_count: 50
+  # Fixed random seed — ensures identical samples across re-runs
+  random_seed: 42
+
+# ---------------------------------------------------------------------------
+# Source repositories / URLs
+# ---------------------------------------------------------------------------
+sources:
+  # Noise corpus — a massive public PDF/DOC archive
+  noisy_repo: "https://github.com/tpn/pdfs.git"
+
+  # True corpus — primary: Fareed's repo bundles pre-curated k8s docs
+  true_repo_primary: "https://github.com/FareedKhan-dev/scalable-rag-pipeline.git"
+  # Sub-path inside that repo that holds the 50 k8s signal docs
+  true_repo_subdir: "true_data"
+
+  # Fallback: scrape kubernetes.io directly if the primary repo is unavailable
+  true_k8s_base_url: "https://kubernetes.io/docs/"
+  # Pages to scrape for fallback (space-separated slugs appended to base URL)
+  true_k8s_pages:
+    - "concepts/overview/what-is-kubernetes/"
+    - "concepts/overview/components/"
+    - "concepts/workloads/pods/"
+    - "concepts/workloads/controllers/deployment/"
+    - "concepts/workloads/controllers/statefulset/"
+    - "concepts/workloads/controllers/daemonset/"
+    - "concepts/workloads/controllers/job/"
+    - "concepts/workloads/controllers/cronjob/"
+    - "concepts/services-networking/service/"
+    - "concepts/services-networking/ingress/"
+    - "concepts/services-networking/network-policies/"
+    - "concepts/storage/persistent-volumes/"
+    - "concepts/storage/storage-classes/"
+    - "concepts/configuration/configmap/"
+    - "concepts/configuration/secret/"
+    - "concepts/configuration/resource-management-for-pods-and-containers/"
+    - "concepts/cluster-administration/logging/"
+    - "concepts/cluster-administration/monitoring/"
+    - "concepts/security/overview/"
+    - "concepts/security/rbac-good-practices/"
+    - "concepts/policy/limit-range/"
+    - "concepts/policy/resource-quotas/"
+    - "concepts/scheduling-eviction/kube-scheduler/"
+    - "concepts/scheduling-eviction/pod-priority-preemption/"
+    - "concepts/scheduling-eviction/node-pressure-eviction/"
+    - "tasks/run-application/run-stateless-application-deployment/"
+    - "tasks/run-application/run-single-instance-stateful-application/"
+    - "tasks/configure-pod-container/configure-liveness-readiness-startup-probes/"
+    - "tasks/configure-pod-container/configure-pod-configmap/"
+    - "tasks/configure-pod-container/configure-service-account/"
+    - "tasks/access-application-cluster/web-ui-dashboard/"
+    - "tasks/administer-cluster/namespaces-walkthrough/"
+    - "tasks/administer-cluster/manage-resources/quota-memory-cpu-namespace/"
+    - "reference/kubectl/overview/"
+    - "reference/kubectl/cheatsheet/"
+    - "reference/kubernetes-api/workload-resources/pod-v1/"
+    - "reference/kubernetes-api/workload-resources/deployment-v1/"
+    - "reference/kubernetes-api/service-resources/service-v1/"
+    - "reference/kubernetes-api/config-and-storage-resources/config-map-v1/"
+    - "reference/kubernetes-api/authentication-resources/service-account-v1/"
+    - "tutorials/kubernetes-basics/"
+    - "tutorials/kubernetes-basics/deploy-app/deploy-intro/"
+    - "tutorials/kubernetes-basics/explore/explore-intro/"
+    - "tutorials/kubernetes-basics/expose/expose-intro/"
+    - "tutorials/kubernetes-basics/scale/scale-intro/"
+    - "tutorials/kubernetes-basics/update/update-intro/"
+    - "tutorials/stateful-application/basic-stateful-set/"
+    - "tutorials/services/connect-applications-service/"
+    - "tutorials/security/cluster-level-pss/"
+
+# ---------------------------------------------------------------------------
+# File-type filters (for tpn/pdfs sampling)
+# ---------------------------------------------------------------------------
+filters:
+  allowed_extensions:
+    - ".pdf"
+    - ".docx"
+    - ".txt"
+    - ".html"
+  # Skip files smaller than this (bytes) — avoids near-empty stubs
+  min_file_size_bytes: 1024
+  # Skip files larger than this (bytes) — avoids one monster file eating the
+  # whole size budget. 5 MB keeps the sample diverse and small.
+  max_file_size_bytes: 5242880  # 5 MB
+
+# ---------------------------------------------------------------------------
+# Output directories (relative to project root)
+# ---------------------------------------------------------------------------
+output:
+  noisy_data_dir: "seed/docs/noisy_data"
+  true_data_dir:  "seed/docs/true_data"
+  sql_migration:  "seed/migrations/003_seed_k8s_ops.sql"
+  # Temp clone location (will be deleted after sampling)
+  temp_clone_dir: "/tmp/adv_rag_pipeline_clones"
+
+# ---------------------------------------------------------------------------
+# SQL generator settings (script 03)
+# ---------------------------------------------------------------------------
+sql_generator:
+  random_seed: 42
+  row_counts:
+    clusters:    50
+    nodes:       5000
+    pods:        50000
+    deployments: 10000
+    incidents:   2000
+    alerts:      100000
+    oncall_logs: 20000
+  # Target file size hint — generator will warn if significantly off
+  target_size_mb: 20

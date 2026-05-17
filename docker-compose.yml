@@ -41,6 +41,9 @@ services:
       - JWT_SECRET=${JWT_SECRET}
       - LOG_JSON=false
       - LOG_LEVEL=INFO
+      # Self-RAG / reflection tuning (overridable via host .env)
+      - REFLECTION_MIN_SCORE=${REFLECTION_MIN_SCORE:-0.85}
+      - MAX_REFLECTION_RETRIES=${MAX_REFLECTION_RETRIES:-2}
     depends_on:
       postgres:
         condition: service_healthy

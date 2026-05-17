@@ -52,6 +52,10 @@ dependencies = [
     "llm-guard>=0.3.15",
     "boto3>=1.35.0",
     "pypdf>=5.1.0",
+
+    # === Data pipeline deps ===
+    "pyyaml>=6.0",   # config.yaml parsing in scripts/data_pipeline/
+    "faker>=33.0.0", # synthetic K8s ops SQL generation
 ]
 
 [project.optional-dependencies]
@@ -62,7 +66,9 @@ dev = [
     "ruff>=0.7.0",
     "mypy>=1.13.0",
     "ragas>=0.2.0",
-    "reportlab>=4.2.0",  # used by seed/docs/generate_pdfs.py
+    "reportlab>=4.2.0",  # PDF generation in scripts/data_pipeline/05_diversify_true_formats.py
+    "python-docx>=1.1.0",  # DOCX generation in scripts/data_pipeline/05_diversify_true_formats.py
+    "streamlit>=1.40.0",
 ]
 
 [tool.ruff]
