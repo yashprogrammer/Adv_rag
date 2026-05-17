@@ -49,11 +49,15 @@ def _get_moderation_scanners() -> list[Any]:
     if _moderation_scanners is not None:
         return _moderation_scanners
     from llm_guard.output_scanners import Toxicity, BanTopics
+    # BanTopics uses a zero-shot classifier and produces frequent false
+    # positives on benign e-commerce content (warranty, shipping, tracking).
+    # Use a high threshold so only confident matches block; toxicity stays
+    # at the configured threshold.
     _moderation_scanners = [
         Toxicity(threshold=settings.output_toxicity_threshold),
         BanTopics(
             topics=["violence", "self-harm", "illegal activities"],
-            threshold=settings.output_toxicity_threshold,
+            threshold=0.9,
         ),
     ]
     return _moderation_scanners

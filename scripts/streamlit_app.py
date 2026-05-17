@@ -234,6 +234,25 @@ def _render_answer_card(payload: dict[str, Any]) -> None:
                 for i, src in enumerate(sources, 1):
                     st.markdown(f"{i}. {src}")
 
+        chunks = meta.get("retrieved_chunks") or []
+        if chunks:
+            with st.expander(f"🧩 Retrieved Context Chunks ({len(chunks)})", expanded=True):
+                st.caption(
+                    "These are the chunks the LLM saw before generating the answer. "
+                    "Flip a feature toggle and re-run to see how retrieval changes."
+                )
+                for i, ch in enumerate(chunks, 1):
+                    src = ch.get("source", "?")
+                    score = ch.get("score", 0.0)
+                    text = ch.get("text", "")
+                    with st.container(border=True):
+                        cols = st.columns([3, 1])
+                        with cols[0]:
+                            st.markdown(f"**{i}. `{src}`**")
+                        with cols[1]:
+                            st.metric("score", f"{score:.3f}")
+                        st.markdown(text)
+
         with st.expander("🔍 Metadata & Raw Response", expanded=False):
             st.json(payload)
 

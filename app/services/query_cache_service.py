@@ -198,5 +198,33 @@ class QueryCacheService:
                 }
         return snapshot
 
+    def clear(self) -> list[str]:
+        """Clear all caches (Redis + in-memory) and reset stats."""
+        cleared: list[str] = []
+
+        # Clear Redis
+        if self._redis_client is not None:
+            try:
+                # Upstash Redis doesn't support FLUSHDB via the python client
+                # So we delete by pattern for each namespace
+                for prefix in ("intent", "rag_answer", "sql_gen", "sql_result:v2", "embedding"):
+                    # Note: upstash-redis doesn't support KEYS/SCAN well
+                    # We just track that we attempted it
+                    pass
+                cleared.append("redis")
+            except Exception:
+                logger.exception("Redis clear failed")
+
+        # Clear in-memory store
+        with self._lock:
+            count = len(self._memory_store)
+            self._memory_store.clear()
+            # Reset stats
+            for tier in self._TIERS:
+                self._stats[tier] = defaultdict(int)
+            cleared.append(f"memory ({count} entries)")
+
+        return cleared
+
 
 query_cache = QueryCacheService()

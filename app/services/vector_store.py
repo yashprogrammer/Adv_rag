@@ -82,6 +82,38 @@ def search(query_embedding: list[float], top_k: int = 5) -> list[RetrievedChunk]
     ]
 
 
+def _build_sparse_index():
+    """Scroll Qdrant and build an in-memory TF-IDF sparse index."""
+    from app.services.sparse_vector_service import SparseVectorIndex
+
+    client = get_client()
+    all_points, _next_page = client.scroll(
+        collection_name=settings.qdrant_collection,
+        limit=10000,
+        with_payload=True,
+        with_vectors=False,
+    )
+
+    documents = [
+        {
+            "text": point.payload.get("text", "") if point.payload else "",
+            "source": point.payload.get("source", "") if point.payload else "",
+            "id": str(point.id),
+        }
+        for point in all_points
+    ]
+
+    sparse_index = SparseVectorIndex()
+    sparse_index.fit(documents)
+    return sparse_index
+
+
+def sparse_search(query_text: str, top_k: int = 5) -> list[RetrievedChunk]:
+    """Pure sparse search using TF-IDF (no dense embeddings, no RRF fusion)."""
+    sparse_index = _build_sparse_index()
+    return sparse_index.search(query_text, top_k=top_k)
+
+
 def hybrid_search(
     query_embedding: list[float],
     query_text: str,
@@ -97,34 +129,13 @@ def hybrid_search(
     4. Fuse with RRF: score = sum(1 / (rrf_k + rank)) for each result set
     5. Return top_k fused results sorted by RRF score
     """
-    from app.services.sparse_vector_service import SparseVectorIndex, fuse_rrf
+    from app.services.sparse_vector_service import fuse_rrf
 
     # 1. Dense results
     dense_results = search(query_embedding, top_k=sparse_top_k)
 
-    # 2. Scroll all points
-    client = get_client()
-    all_points, _next_page = client.scroll(
-        collection_name=settings.qdrant_collection,
-        limit=10000,
-        with_payload=True,
-        with_vectors=False,
-    )
-
-    # 3. Build sparse index
-    documents = [
-        {
-            "text": point.payload.get("text", "") if point.payload else "",
-            "source": point.payload.get("source", "") if point.payload else "",
-            "id": str(point.id),
-        }
-        for point in all_points
-    ]
-
-    sparse_index = SparseVectorIndex()
-    sparse_index.fit(documents)
-
-    # 4. Sparse results
+    # 2-4. Sparse results
+    sparse_index = _build_sparse_index()
     sparse_results = sparse_index.search(query_text, top_k=sparse_top_k)
 
     # 5. Fuse and return top_k
