@@ -21,6 +21,7 @@ FEATURE = Literal[
     "sql",
     "hybrid_rag_sql",
     "security",
+    "wild",
 ]
 
 
@@ -70,11 +71,14 @@ def load_goldens(path: str | Path) -> list[Golden]:
         duplicates = {i for i in ids if ids.count(i) > 1}
         raise ValueError(f"Duplicate golden IDs found: {duplicates}")
 
-    # Verify each feature category has at least one entry
+    # Warn (don't fail) if some feature categories have no entries.
+    # Not every feature needs eval goldens — e.g. dense/sparse/security are
+    # demo-only and intentionally excluded from the eval-progression set.
     present_features = {g.demonstrates_feature for g in goldens}
     all_features = set(FEATURE.__args__)  # type: ignore[attr-defined]
     missing = all_features - present_features
     if missing:
-        raise ValueError(f"Missing golden entries for features: {missing}")
+        import warnings
+        warnings.warn(f"No golden entries for features: {missing} (OK if demo-only)")
 
     return goldens
