@@ -43,10 +43,23 @@ class PendingSQLBlock(BaseModel):
     explanation: str
 
 
+class RetrievedChunkPreview(BaseModel):
+    """Compact view of a retrieved chunk surfaced to the API/UI."""
+
+    text: str
+    source: str
+    score: float = 0.0
+
+
 class ResponseMetadata(BaseModel):
     restructure_method: str = "original"
     validation_attempts: int = 0
     route: str = "rag"
+    retrieved_chunks: list[RetrievedChunkPreview] = Field(default_factory=list)
+    # Self-RAG / reflection telemetry
+    reflection_iterations: int = 0
+    reflection_score: float | None = None
+    refined_question: str | None = None
 
 
 class ChatResponse(BaseModel):

@@ -7,7 +7,8 @@ from app.config import settings
 from app.models import ReflectionResult
 from app.services.llm_service import generate_with_json
 
-_REFLECTION_PROMPT = """You are evaluating the quality of an AI-generated answer to a user question.
+_REFLECTION_PROMPT = """You are a strict reviewer evaluating an AI-generated answer.
+Your job is to FAIL answers that don't deliver real value to the user.
 
 User Question: {question}
 
@@ -15,17 +16,43 @@ Generated Answer: {answer}
 
 Retrieved Context (if any): {context}
 
-Evaluate the answer on these criteria (1-10 scale each):
-1. Relevance: Does the answer directly address the question?
-2. Accuracy: Is the information factually correct based on the context?
-3. Completeness: Does the answer cover all aspects of the question?
-4. Clarity: Is the answer clear and well-structured?
+Score each criterion 1-10. BE STRICT — do not give pity points.
 
-Overall reflection score = average of the four criteria / 10.0 (scale 0.0-1.0)
+1. Relevance (1-10):
+   - 10: Directly answers the question with concrete content.
+   - 5 or below: Hedges, refuses, or gives only meta-commentary
+     ("The retrieved context does not provide...", "I don't have information...",
+     "It depends...", "Many things could be meant by this...").
+   - 3 or below: Off-topic or talks about unrelated subjects from the context.
 
-If the score is below 0.8, the answer needs regeneration. Provide a refined version of the question that would help generate a better answer.
+2. Accuracy (1-10):
+   - 10: All claims are grounded in the retrieved context and are factually correct.
+   - 5 or below: Some claims are unsupported by the context.
+   - 3 or below: The answer contradicts the context or invents facts.
 
-Respond ONLY with a JSON object:
+3. Completeness (1-10):
+   - 10: Addresses every part of the question with sufficient depth.
+   - 5 or below: Misses major parts of the question, or is too short to be useful
+     (e.g. one sentence answers to a multi-part technical question).
+   - 3 or below: Effectively a non-answer ("I don't know", "see the documentation").
+
+4. Clarity (1-10):
+   - 10: Well-structured, easy to follow, uses examples where helpful.
+   - 5 or below: Disorganised, jargon-heavy, or confusing.
+
+Overall reflection_score = average of the four criteria / 10.0 (range 0.0–1.0).
+
+needs_regeneration is True if ANY of the following hold:
+- The answer is a hedge or refusal ("does not provide", "I don't have", "unclear").
+- Relevance or Completeness scored 5 or below.
+- The overall score is below 0.85.
+- The question is vague/ambiguous and a SHARPER reformulation would clearly help.
+
+When needs_regeneration is True, set refined_question to a fully self-contained,
+single-sentence reformulation of the user's question that adds the missing
+specificity (e.g. add domain context, name the entity, narrow the timeframe).
+
+Respond ONLY with a JSON object — no prose before or after:
 {{"reflection_score": float, "needs_regeneration": bool, "refined_question": str, "reasoning": str}}
 """
 

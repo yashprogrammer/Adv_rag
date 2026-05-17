@@ -9,7 +9,13 @@ from app.config import settings
 from app.core.graph import graph
 from app.middleware.auth import User, get_current_user
 from app.middleware.rate_limiter import is_allowed_user
-from app.models import ChatResponse, PendingSQLBlock, QueryRequest, ResponseMetadata
+from app.models import (
+    ChatResponse,
+    PendingSQLBlock,
+    QueryRequest,
+    ResponseMetadata,
+    RetrievedChunkPreview,
+)
 from app.security.content_moderation import moderate_and_redact
 from app.security.input_guard import check_input_safe
 from app.security.input_restructuring import count_tokens, restructure_input
@@ -89,12 +95,14 @@ async def query(req: QueryRequest, user: User = Depends(get_current_user)) -> Ch
     try:
         validated = validate_with_retry(redacted_answer, llm_fn=_retry_llm)
         final_answer = validated.answer
-        final_sources = validated.sources
         final_confidence = validated.confidence
     except Exception:
         final_answer = redacted_answer
-        final_sources = result.get("sources", [])
         final_confidence = result.get("confidence", 0.0)
+    # Sources are the actual retrieved-chunk filenames from the graph state,
+    # not whatever the validator-retry LLM fabricated. Trusting the LLM here
+    # produces hallucinated source names like "Company Return Policy Document".
+    final_sources = result.get("sources", [])
 
     # L6c: Token budget consume
     consume_budget(user.username, estimated_tokens)
@@ -116,13 +124,22 @@ async def query(req: QueryRequest, user: User = Depends(get_current_user)) -> Ch
             metadata=ResponseMetadata(route="sql", restructure_method=method_label),
         )
 
+    chunk_previews = [
+        RetrievedChunkPreview(**c) for c in result.get("chunk_previews", []) or []
+    ]
     return ChatResponse(
         answer=final_answer,
         sources=final_sources,
         confidence=final_confidence,
         cache_hit=bool(result.get("rag_cache_hit") or any(result.get("cache_hits", {}).values())),
         cost_saved=f"${float(result.get('cost_saved_usd', 0.0)):.2f}",
-        metadata=ResponseMetadata(route=result.get("intent", "rag"), restructure_method=method_label),
+        metadata=ResponseMetadata(
+            route=result.get("intent", "rag"),
+            restructure_method=method_label,
+            retrieved_chunks=chunk_previews,
+            reflection_iterations=int(result.get("reflection_iterations") or 0),
+            refined_question=result.get("refined_question"),
+        ),
     )
 
 

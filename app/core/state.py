@@ -41,6 +41,7 @@ class GraphState(TypedDict):
     final_answer: str | None
     sources: list[str]
     confidence: float | None
+    chunk_previews: list[dict]  # [{text, source, score}, ...] for API/UI surfacing
 
     # Meta
     cache_hits: dict[str, bool]

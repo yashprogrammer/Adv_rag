@@ -74,7 +74,7 @@ class Settings(BaseSettings):
     crag_relevance_threshold: float = 0.7
     crag_ambiguous_threshold: float = 0.5
     crag_enabled_by_default: bool = True
-    reflection_min_score: float = 0.8
+    reflection_min_score: float = 0.85
     max_reflection_retries: int = 2
     self_reflective_enabled_by_default: bool = False
 

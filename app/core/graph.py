@@ -15,7 +15,7 @@ from app.config import settings
 from app.core.state import GraphState
 from app.security.spotlighting import build_spotlighted_context
 from app.services.llm_service import generate
-from app.services.rag_service import run_rag
+from app.services.rag_service import run_rag, run_rag_with_trace
 from app.services.router_service import classify_intent
 from app.services.sql_service import SQLService
 
@@ -124,14 +124,21 @@ def generate_answer(state: GraphState) -> dict:
     if intent == "hybrid":
         return _generate_hybrid_answer(state)
 
-    # RAG path
-    response = run_rag(state["question"], flags=state.get("flags", {}))
+    # RAG path — use the trace variant so we can surface the actual chunks.
+    response, chunks = run_rag_with_trace(state["question"], flags=state.get("flags", {}))
+    chunk_previews = [
+        {"text": c.text, "source": c.source, "score": float(c.score)} for c in chunks
+    ]
     return {
         "final_answer": response.answer,
         "sources": response.sources,
         "confidence": response.confidence,
         "rag_cache_hit": response.cache_hit,
         "cache_hits": {"rag_answer": response.cache_hit},
+        "chunk_previews": chunk_previews,
+        # Surface Self-RAG telemetry so the API can include it in the response.
+        "reflection_iterations": response.metadata.reflection_iterations,
+        "refined_question": response.metadata.refined_question,
     }
 
 
