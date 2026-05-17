@@ -1,12 +1,18 @@
-"""Abstract invokers for service-mode and API-mode evaluation."""
+"""Abstract invokers for service-mode and API-mode evaluation.
+
+Lesson 0 — the ServiceInvoker is a STUB. The RAG service does not exist yet.
+Running `make eval-baseline` here will fail with a clear message:
+  "RAG service not implemented — see Lesson 1 (lesson-1-naive branch)."
+
+The invoker is fleshed out incrementally:
+  - L1 wires run_rag_with_trace_no_cache (dense only)
+  - L2+ wire additional retrieval modes via the same call site
+"""
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-
-from app.config import settings
-from app.models import ChatResponse, RetrievedChunk
-from app.services.rag_service import run_rag_with_trace_no_cache
+from typing import Any
 
 
 class SkippedIntent(Exception):
@@ -21,42 +27,24 @@ class Invoker(ABC):
     @abstractmethod
     def invoke(
         self, question: str, flags: dict, intent: str
-    ) -> tuple[ChatResponse, list[RetrievedChunk]]:
-        """Run a single golden through the pipeline.
-
-        Args:
-            question: The user's question.
-            flags: Flag profile dict.
-            intent: Intent from the golden (rag, sql, hybrid, web_fallback).
-
-        Returns:
-            Tuple of (ChatResponse, list of RetrievedChunk).
-
-        Raises:
-            SkippedIntent: If the invoker cannot handle this intent.
-        """
+    ) -> tuple[Any, list]:
+        """Run a single golden through the pipeline."""
         ...
 
 
 class ServiceInvoker(Invoker):
-    """Phase A — direct in-process call. SQL & hybrid intents are skipped."""
+    """L0 STUB — raises NotImplementedError.
+
+    In Lesson 1 this method is replaced with a real call to
+    `run_rag_with_trace_no_cache` to drive the naive RAG pipeline.
+    """
 
     SUPPORTED_INTENTS = {"rag", "web_fallback"}
 
     def invoke(
         self, question: str, flags: dict, intent: str
-    ) -> tuple[ChatResponse, list[RetrievedChunk]]:
-        if intent not in self.SUPPORTED_INTENTS:
-            raise SkippedIntent(f"intent={intent} not supported in service mode")
-
-        # Skip CRAG web_fallback goldens if Tavily key is missing
-        if intent == "web_fallback" and not settings.tavily_api_key:
-            raise SkippedIntent("tavily_unset: TAVILY_API_KEY not configured")
-
-        # Eval always bypasses the answer cache — each golden must produce
-        # a fresh retrieve+generate so scores reflect current pipeline state.
-        return run_rag_with_trace_no_cache(question, flags)
-
-
-# Phase B will add:
-# class ApiInvoker(Invoker): ...
+    ) -> tuple[Any, list]:
+        raise NotImplementedError(
+            "RAG service is not implemented in Lesson 0. "
+            "Switch to the lesson-1-naive branch to enable retrieval-based evaluation."
+        )
