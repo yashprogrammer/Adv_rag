@@ -32,6 +32,7 @@ MODULES = [
     "app.services.vector_store",
     "app.services.sparse_vector_service",
     "app.services.reranking",
+    "app.services.hyde",
     "app.services.document_processor",
     "app.services.llm_service",
     "app.services.rag_service",
