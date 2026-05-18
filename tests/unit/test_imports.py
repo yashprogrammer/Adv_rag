@@ -38,6 +38,7 @@ MODULES = [
     "app.services.self_reflective",
     "app.services.router_service",
     "app.services.sql_service",
+    "app.services.doc_cache_service",
     "app.services.document_processor",
     "app.services.llm_service",
     "app.services.rag_service",

@@ -31,6 +31,7 @@ from app.services.crag import crag_pipeline
 from app.services.embedding_service import embed_texts
 from app.services.hyde import HyDERetriever
 from app.services.llm_service import generate
+from app.services.query_cache_service import query_cache
 from app.services.reranking import Reranker
 from app.services.router_service import classify_intent
 from app.services.self_reflective import reflect_on_answer, should_regenerate
@@ -226,15 +227,40 @@ def _run_hybrid_inline(
 # Top-level entry points
 # ---------------------------------------------------------------------------
 
+def _cache_context(flags: dict | None) -> dict:
+    """Subset of flags used as the RAG-answer cache key."""
+    return {
+        "search_mode": _flag(flags, "search_mode", "dense"),
+        "enable_hyde": bool(_flag(flags, "enable_hyde", False)),
+        "enable_rerank": bool(_flag(flags, "enable_rerank", False)),
+        "enable_crag": bool(_flag(flags, "enable_crag", settings.crag_enabled_by_default)),
+        "enable_self_reflective": bool(_flag(flags, "enable_self_reflective", False)),
+        "top_k": int(_flag(flags, "top_k", 5)),
+    }
+
+
 def run_rag(question: str, flags: dict | int | None = None) -> ChatResponse:
     """Auto-route the question and run the appropriate pipeline.
 
-    L7 adds intent routing: questions are first classified as rag/sql/hybrid
-    by the router, then dispatched. The RAG path is unchanged from L6.
+    Lesson 8 wraps the full pipeline in the 5-tier query cache:
+      - intent cache  (router result, 24h TTL)
+      - rag_answer    (full ChatResponse, 1h TTL)  — checked here
+      - embedding     (embeddings, 7d TTL)         — inside embed_texts()
+      - sql_gen       (generated SQL, 24h TTL)     — inside SQLService
+      - sql_result    (executed rows, 15m TTL)     — inside SQLService
     """
+    cache_ctx = (
+        _cache_context(flags) if isinstance(flags, dict) else _cache_context(None)
+    )
+    cached = query_cache.get_rag_answer(question, cache_ctx)
+    if cached is not None:
+        resp = ChatResponse(**cached)
+        resp.cache_hit = True  # set on the schema (added in L8)
+        return resp
+
     intent = classify_intent(question)
     logger.info(
-        "L7 query | intent={} mode={} rerank={} hyde={} crag={} self_rag={} top_k={}",
+        "L8 query | intent={} mode={} rerank={} hyde={} crag={} self_rag={} top_k={}",
         intent,
         _flag(flags, "search_mode", "dense"),
         _flag(flags, "enable_rerank", False),
@@ -244,13 +270,17 @@ def run_rag(question: str, flags: dict | int | None = None) -> ChatResponse:
         int(_flag(flags, "top_k", 5)),
     )
     if intent == "sql":
-        return _run_sql_inline(question)
-    if intent == "hybrid":
-        response, _ = _run_hybrid_inline(question, flags if isinstance(flags, dict) else None)
-        return response
-    # default: rag
-    chunks = _retrieve(question, flags=flags if isinstance(flags, dict) else None)
-    return _generate(question, chunks, flags=flags if isinstance(flags, dict) else None)
+        response = _run_sql_inline(question)
+    elif intent == "hybrid":
+        response, _ = _run_hybrid_inline(
+            question, flags if isinstance(flags, dict) else None
+        )
+    else:
+        chunks = _retrieve(question, flags=flags if isinstance(flags, dict) else None)
+        response = _generate(question, chunks, flags=flags if isinstance(flags, dict) else None)
+
+    query_cache.set_rag_answer(question, response.model_dump(), cache_ctx)
+    return response
 
 
 def run_rag_with_trace(
