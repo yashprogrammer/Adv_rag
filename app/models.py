@@ -1,10 +1,11 @@
 """Pydantic models for requests, responses, and internal data shapes.
 
-Lesson 1 — naive RAG only. Advanced flags (search_mode/hyde/rerank/crag/
-self_reflective) + SQL/CRAG/Reflection models come in L2-L7.
+Lesson 2 — adds search_mode to QueryRequest. HyDE/rerank/CRAG/Self-RAG
+flags + SQL/CRAG/Reflection models come in L3-L7.
 """
 
 import re
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -61,14 +62,15 @@ class ChatResponse(BaseModel):
 
 
 class QueryRequest(BaseModel):
-    """L1 QueryRequest — only `question` + `top_k`.
+    """L2 QueryRequest — adds `search_mode` for hybrid retrieval.
 
-    Advanced retrieval flags are added per-lesson:
-      - L2: search_mode (dense | sparse | hybrid)
-      - L3: enable_rerank
-      - L4: enable_hyde
-      - L5: enable_crag
-      - L6: enable_self_reflective
+    Lesson-by-lesson evolution of flags:
+      - L1: question + top_k
+      - L2: + search_mode (dense | sparse | hybrid)   ← THIS LESSON
+      - L3: + enable_rerank
+      - L4: + enable_hyde
+      - L5: + enable_crag
+      - L6: + enable_self_reflective
     """
 
     question: str = Field(
@@ -77,6 +79,7 @@ class QueryRequest(BaseModel):
         max_length=2000,
         description="User question",
     )
+    search_mode: Literal["dense", "sparse", "hybrid"] = "dense"
     top_k: int = Field(default=5, ge=1, le=50)
 
     @field_validator("question")

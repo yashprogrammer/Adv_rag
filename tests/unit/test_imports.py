@@ -30,6 +30,7 @@ MODULES = [
     "app.security.spotlighting",
     "app.services.embedding_service",
     "app.services.vector_store",
+    "app.services.sparse_vector_service",
     "app.services.document_processor",
     "app.services.llm_service",
     "app.services.rag_service",

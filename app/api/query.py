@@ -19,4 +19,7 @@ async def query(
     user: User = Depends(get_current_user),
 ) -> ChatResponse:
     """Run the naive RAG pipeline against the user's question."""
-    return run_rag(body.question, flags={"top_k": body.top_k})
+    return run_rag(
+        body.question,
+        flags={"top_k": body.top_k, "search_mode": body.search_mode},
+    )
