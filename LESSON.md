@@ -1,148 +1,129 @@
-# Lesson 0 — Setup (Environment, Infrastructure, Corpus)
+# Lesson 1 — Naive RAG (Dense Top-k=5)
 
-> **Eval target:** baseline run → 33% (first measurement ever)
-> **Branch:** `lesson-0-setup`  ·  **Previous lesson:** none
+> **Eval target:** 33% → 33% (locks the baseline — no improvement expected)
+> **Branch:** `lesson-1-naive-rag`  ·  **Previous lesson:** `lesson-0-setup`
 
 ## What you'll build
 
-A fully running local environment: Postgres + Qdrant + Redis in Docker, the FastAPI app wired to OpenAI and Tavily, the 77-document corpus ingested, the K8s ops SQL database seeded, and the evaluation harness ready so every subsequent lesson can show a measurable improvement.
+The minimal working RAG pipeline: embed the user query with OpenAI `text-embedding-3-small`, retrieve the top-5 most similar chunks from Qdrant by cosine similarity, spotlight the chunks inside `<retrieved_context>` tags, and call GPT-4o to generate a grounded answer. Every subsequent lesson improves on this exact pipeline.
 
 ## Why this feature — the pain from last lesson
 
-Today most production RAG systems start naive — let's see how far that gets us. Before we can prove anything, we need a reproducible baseline: infrastructure up, corpus loaded, eval harness configured. This lesson does nothing smart with retrieval. It exists so that when L1 runs `make eval`, the 33% number is yours to improve, not a screenshot from a slide.
+After L0, infrastructure is up and the corpus is loaded, but the app returns stub answers. Today most production RAG systems start naive — let's see how far that gets us. The 30% noise in our corpus (30 academic CS papers alongside 47 K8s docs) ensures that dense-only retrieval will visibly fail on a meaningful fraction of the golden questions. The eval run at the end of this lesson locks that 33% number so future improvements are unambiguous.
 
 ## Pipeline diagram (before → after)
 
 ```mermaid
-flowchart TD
-    subgraph Infra["Docker Compose (lesson-0)"]
-        PG[(Postgres\n5432)]
-        QD[(Qdrant\n6333)]
-        RD[(Redis\n6379)]
-        APP[FastAPI\n:8000]
-    end
+flowchart LR
+    Q[User question] -->|embed| E[OpenAI\ntext-embedding-3-small]
+    E -->|cosine top-5| QD[(Qdrant\n3 534 chunks)]
+    QD -->|5 chunks| SP[Spotlighting\nwrap in retrieved_context tags]
+    SP -->|context + question| LLM[GPT-4o\ngenerate_answer]
+    LLM --> A[Answer + sources]
 
-    subgraph Corpus["77-doc Corpus"]
-        TRU["47 K8s docs\n(true_data/)"]
-        NOI["30 academic CS papers\n(noisy_data/) — the haystack"]
-    end
-
-    subgraph SQL["K8s Ops DB (7 tables)"]
-        CL[clusters · nodes · pods]
-        INC[incidents · alerts · oncall_logs]
-        DEP[deployments]
-    end
-
-    TRU & NOI -->|Docling chunk → OpenAI embed → upsert| QD
-    SQL --> PG
-    APP --> QD
-    APP --> PG
-    APP --> RD
-
-    style NOI fill:#fff3e0
-    style TRU fill:#e8f5e9
+    style QD fill:#e3f2fd
+    style LLM fill:#e8f5e9
 ```
 
 ## Files you're adding
 
-- `docker-compose.yml` (already present — verify it is healthy)
-- `eval/seed_questions.yaml` — 21 golden K8s questions
-- `eval/results/lesson-0-baseline.json` — your verification artifact
-- `.env` — local secrets (never committed)
+- `tests/unit/test_rag_service.py` — smoke tests for `_retrieve` and `_generate`
+- `eval/results/lesson-1-baseline.json` — copy of the naive eval run
 
 ## Files you're modifying
 
-- `.env.example` → `.env` — fill in `OPENAI_API_KEY`, `TAVILY_API_KEY`, `UPSTASH_REDIS_URL`, `UPSTASH_REDIS_TOKEN`
+- `app/services/rag_service.py` — `_retrieve()` and `_generate()` are already implemented; verify the dense path
+- `app/core/graph.py` — `retrieve_rag` node calls `_retrieve`; `generate_answer` calls `_generate`
+- `app/models.py` — confirm `QueryRequest` has `search_mode`, `enable_hyde`, `enable_rerank`, `enable_crag`, `enable_self_reflective`, `top_k`
 
 ## Step-by-step build
 
-1. **Clone and install deps.**
-   ```bash
-   git clone <repo> && cd AdvProject/My_project
-   make install          # uv venv + uv sync
+1. **Inspect the dense retrieval path in `rag_service.py`.**
+   Open `app/services/rag_service.py` and find `_retrieve()`. Confirm the `else` (dense) branch:
+   ```python
+   embeddings = embed_texts([question])
+   query_embedding = embeddings[0]
+   chunks = search(query_embedding, top_k=top_k)
    ```
-   Expected: `.venv/` created, `uv run python --version` prints `3.12.x`.
+   This is all naive RAG does. No reranking, no HyDE, no CRAG guard.
 
-2. **Copy the env template and fill in secrets.**
-   ```bash
-   cp .env.example .env
-   # Edit .env — required keys:
-   #   OPENAI_API_KEY=sk-...
-   #   TAVILY_API_KEY=tvly-...       ← needed for L5 CRAG; add now
-   #   UPSTASH_REDIS_URL=https://...
-   #   UPSTASH_REDIS_TOKEN=...
-   ```
+2. **Confirm the graph wires `retrieve_rag → generate_answer`.**
+   In `app/core/graph.py`, the `retrieve_rag` node should call `_retrieve(state["question"], flags)` and write results to `state["chunks"]`.
 
-3. **Start infrastructure.**
-   ```bash
-   docker compose up -d
-   docker compose ps      # all services should show "healthy" or "running"
-   ```
-   Expected output includes: `qdrant`, `postgres`, `redis`, `app` rows.
-
-4. **Verify health endpoint.**
-   ```bash
-   curl -s http://localhost:8000/admin/health | jq
-   ```
-   Expected:
-   ```json
-   {"status":"ok","qdrant":true,"postgres":true,"redis":true,"openai":true,"tavily":true}
+3. **Verify `QueryRequest` in `app/models.py`.**
+   All flag fields must be present with defaults:
+   ```python
+   search_mode: str = "dense"
+   enable_hyde: bool = False
+   enable_rerank: bool = False
+   enable_crag: bool = False
+   enable_self_reflective: bool = False
+   top_k: int = 5
    ```
 
-5. **Seed the K8s ops SQL database.**
-   ```bash
-   make seed
-   ```
-   Expected: migration logs ending in `Seeded k8s_ops: 50 clusters, 5000 nodes, ...`
+4. **Write a minimal unit test.**
+   Create `tests/unit/test_rag_service.py`:
+   ```python
+   from unittest.mock import patch, MagicMock
+   from app.services.rag_service import _retrieve
 
-6. **Ingest the 77-document corpus.**
-   ```bash
-   make seed-data        # downloads noisy_data + ingests true_data
+   def test_dense_retrieve_calls_embed_and_search():
+       with patch("app.services.rag_service.embed_texts") as mock_embed, \
+            patch("app.services.rag_service.search") as mock_search:
+           mock_embed.return_value = [[0.1] * 1536]
+           mock_search.return_value = []
+           result = _retrieve("What is a Pod?", {"search_mode": "dense", "top_k": 5,
+                                                  "enable_rerank": False, "enable_crag": False})
+           mock_embed.assert_called_once()
+           mock_search.assert_called_once()
    ```
-   Verify the vector store is populated:
-   ```bash
-   curl -s http://localhost:6333/collections/documents | jq '.result.points_count'
-   # Expected: 3534 (±50 depending on chunk boundaries)
-   ```
+   Run: `uv run pytest tests/unit/test_rag_service.py -v` — should pass.
 
-7. **Get a demo JWT.**
-   ```bash
-   TOKEN=$(curl -sX POST http://localhost:8000/auth/login \
-     -H "Content-Type: application/json" \
-     -d '{"username":"agent@demo.local","password":"agent123"}' \
-     | jq -r .token)
-   echo $TOKEN   # should print a long JWT string
-   ```
-
-8. **Run the baseline eval and save the artifact.**
+5. **Run the full naive eval.**
    ```bash
    make eval-baseline
-   # Writes: eval/results/<timestamp>_naive.json
    cp eval/results/$(ls -t eval/results/*_naive.json | head -1 | xargs basename) \
-      eval/results/lesson-0-baseline.json
+      eval/results/lesson-1-baseline.json
    ```
-   Expected console output: `faithfulness ~0.XX  context_recall ~0.33  answer_relevancy ~0.XX`
 
 ## Verification
 
 ### Quick smoke test
 
 ```bash
+# Ensure TOKEN is set from L0
 curl -sX POST http://localhost:8000/query \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "question": "What is a Pod in Kubernetes?",
+    "question": "How do containers share resources within a Pod?",
     "search_mode": "dense",
     "enable_hyde": false,
     "enable_rerank": false,
     "enable_crag": false,
     "enable_self_reflective": false,
     "top_k": 5
-  }' | jq '.answer, .sources[0]'
+  }' | jq '.answer, .sources[0], .metadata.latency_ms'
 ```
 
-Expected: answer mentions "container", "namespace", "shared network". Source is `pods.html`.
+Expected: answer describes shared network namespace, IP, volumes, localhost. Source includes `pods.html`. Latency ~6 000 ms.
+
+Now try a question where naive RAG fails — watch the chunks panel:
+
+```bash
+curl -sX POST http://localhost:8000/query \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "question": "What does error ErrImagePull mean and how do I fix it?",
+    "search_mode": "dense",
+    "enable_hyde": false, "enable_rerank": false,
+    "enable_crag": false, "enable_self_reflective": false,
+    "top_k": 5
+  }' | jq '.sources'
+```
+
+Expected: sources are NOT `troubleshooting-pods.html` — the noise corpus is drowning the signal. This motivates L2.
 
 ### Eval check
 
@@ -151,16 +132,15 @@ make eval-baseline
 uv run python -m eval.run_ragas --profile naive
 ```
 
-Expected: `context_recall ~33%`. This is your locked-in baseline. Compare future lessons against `eval/results/lesson-0-baseline.json`.
+Expected: `context_recall ~33%`. Compare against `eval/results/lesson-0-baseline.json` — numbers should match. If they diverge, your environment changed between lessons; re-seed with `make seed-data`.
 
 ## What's next
 
-L1 wires up the actual naive RAG pipeline (dense top-k=5). The eval score stays at 33% — but now the pipeline is real, and you can inspect chunks, latency, and answer quality. The gap you observe in L1 motivates every lesson from L2 onward.
+L2 adds hybrid search (BM25 sparse + dense + Reciprocal Rank Fusion). The literal token `ErrImagePull` that dense just missed will be exactly what BM25 pins. Eval jumps to ~45%.
 
 ## References
 
-- `DEMO_VIDEO_SCRIPT.md` section 0 (Setup checklist)
-- `docker-compose.yml` — service definitions
-- `eval/profiles.py` — `naive` profile used here
-- `eval/seed_questions.yaml` — the 21 golden questions
-- `PRD.md` — domain framing (K8s IT-Ops copilot)
+- `DEMO_VIDEO_SCRIPT.md` section 1 (Dense search demo)
+- `eval/profiles.py` — `naive` profile
+- `app/services/rag_service.py` — `_retrieve()`, `_generate()`
+- `app/security/spotlighting.py` — `build_spotlighted_context()`

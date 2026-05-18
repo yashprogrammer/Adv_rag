@@ -1,213 +1,96 @@
-"""RAG service with Phase 2+3 retrieval and quality controls."""
+"""Naive RAG service — Lesson 1.
 
-from app.config import settings
-from app.models import ChatResponse, RetrievedChunk
-from app.security.output_validator import validate_with_retry
+This is the ENTIRE pipeline at this stage:
+  1. Embed the question
+  2. Dense vector search (top-k=5)
+  3. Stuff chunks into the prompt
+  4. Generate an answer
+
+No HyDE, no reranking, no CRAG, no Self-RAG, no answer cache. Those
+are added incrementally in subsequent lessons.
+"""
+
+from __future__ import annotations
+
+from loguru import logger
+
+from app.models import (
+    ChatResponse,
+    ResponseMetadata,
+    RetrievedChunk,
+    RetrievedChunkPreview,
+)
 from app.security.spotlighting import build_spotlighted_context
 from app.security.system_prompt import build_system_prompt
-from app.services.crag import crag_pipeline
 from app.services.embedding_service import embed_texts
-from app.services.hyde import HyDERetriever
 from app.services.llm_service import generate
-from app.services.query_cache_service import query_cache
-from app.services.reranking import Reranker
-from app.services.self_reflective import reflect_on_answer, should_regenerate
-from app.services.vector_store import hybrid_search, search, sparse_search
+from app.services.vector_store import search
 
 
-def _retrieve(question: str, flags: dict) -> list[RetrievedChunk]:
-    """Retrieve chunks for a question according to flags.
+def _retrieve(question: str, top_k: int = 5) -> list[RetrievedChunk]:
+    """Embed the question and run dense top-k similarity search."""
+    embeddings = embed_texts([question])
+    return search(embeddings[0], top_k=top_k)
 
-    Steps: retrieve → rerank → CRAG.
+
+def _generate(question: str, chunks: list[RetrievedChunk]) -> ChatResponse:
+    """Build the prompt, call the LLM, return a structured response.
+
+    Spotlighting wraps the retrieved chunks in XML tags so the LLM
+    treats them as data, not instructions (cheap injection defense
+    that already exists from L0).
     """
-    top_k = flags.get("top_k", 5)
-    search_mode = flags.get("search_mode", "dense")
-    enable_hyde = flags.get("enable_hyde", False)
-    enable_rerank = flags.get("enable_rerank", True)
-    enable_crag = flags.get("enable_crag", settings.crag_enabled_by_default)
-
-    # 1. Retrieve
-    if enable_hyde:
-        chunks = HyDERetriever().retrieve(question, top_k=top_k)
-    elif search_mode == "hybrid":
-        embeddings = embed_texts([question])
-        query_embedding = embeddings[0]
-        chunks = hybrid_search(
-            query_embedding=query_embedding,
-            query_text=question,
-            top_k=top_k,
-            rrf_k=settings.rrf_k,
-        )
-    elif search_mode == "sparse":
-        # Pure TF-IDF sparse search (no dense embeddings, no RRF fusion)
-        chunks = sparse_search(query_text=question, top_k=top_k)
-    else:
-        # dense
-        embeddings = embed_texts([question])
-        query_embedding = embeddings[0]
-        chunks = search(query_embedding, top_k=top_k)
-
-    # 2. Rerank
-    if enable_rerank and chunks:
-        chunks = Reranker().rerank(question, chunks, top_k=top_k)
-
-    # 3. CRAG (grade relevance + optional web fallback)
-    chunks, _evaluation, _used_web = crag_pipeline(
-        question=question,
-        chunks=chunks,
-        enable_crag=enable_crag,
-    )
-
-    return chunks
-
-
-def _generate(
-    question: str,
-    chunks: list[RetrievedChunk],
-    flags: dict,
-) -> ChatResponse:
-    """Generate a validated ChatResponse from retrieved chunks.
-
-    Steps: spotlight → generate → reflect → validate.
-    """
-    enable_self_reflective = flags.get(
-        "enable_self_reflective",
-        settings.self_reflective_enabled_by_default,
-    )
-
-    # 4. Spotlight
     spotlighted = build_spotlighted_context(chunks)
-
-    # 5. Generate
     system = build_system_prompt()
-    working_question = question
+    user_msg = f"{spotlighted}\n\nQuestion: {question}"
 
-    def _generate_raw_answer(current_question: str) -> str:
-        user_msg = f"{spotlighted}\n\nQuestion: {current_question}"
-        result = generate(system, user_msg)
-        return result["text"]
+    raw = generate(system, user_msg)["text"]
 
-    raw = _generate_raw_answer(working_question)
-
-    # 6. Self-reflective regeneration loop
-    reflection_iterations = 0
-    last_reflection_score: float | None = None
-    final_refined_question: str | None = None
-    if enable_self_reflective:
-        while True:
-            reflection = reflect_on_answer(
-                question=working_question,
-                answer=raw,
-                context=spotlighted,
-            )
-            last_reflection_score = float(reflection.reflection_score)
-            if not should_regenerate(reflection, reflection_iterations):
-                break
-            # Capture the refined question that drove this regeneration
-            final_refined_question = reflection.refined_question or working_question
-            working_question = final_refined_question
-            raw = _generate_raw_answer(working_question)
-            reflection_iterations += 1
-
-    # 7. Validate
-    def _retry_llm(prompt: str, error: str) -> str:
-        return generate(system, prompt)["text"]
-
-    response = validate_with_retry(raw, llm_fn=_retry_llm)
-
-    # 8. Surface self-RAG telemetry in the response metadata so callers
-    #    (UI, eval harness, demo script) can prove the loop actually ran.
-    if enable_self_reflective:
-        response.metadata.reflection_iterations = reflection_iterations
-        response.metadata.reflection_score = last_reflection_score
-        response.metadata.refined_question = final_refined_question
-    return response
-
-
-def run_rag(question: str, flags: dict | None = None) -> ChatResponse:
-    """Run the RAG pipeline with optional HyDE, hybrid search, CRAG, and reflection.
-
-    1. Retrieve chunks (dense / hybrid / HyDE)
-    2. Rerank (optional)
-    3. CRAG evaluation + optional web fallback
-    4. Spotlight chunks
-    5. Generate answer with LLM
-    6. Optional self-reflection and regeneration
-    7. Validate output schema
-    """
-    flags = flags or {}
-    cache_context = {
-        "search_mode": flags.get("search_mode", "dense"),
-        "enable_hyde": bool(flags.get("enable_hyde", False)),
-        "enable_rerank": bool(flags.get("enable_rerank", True)),
-        "enable_crag": bool(flags.get("enable_crag", settings.crag_enabled_by_default)),
-        "enable_self_reflective": bool(
-            flags.get("enable_self_reflective", settings.self_reflective_enabled_by_default)
+    chunk_previews = [
+        RetrievedChunkPreview(text=c.text, source=c.source, score=c.score) for c in chunks
+    ]
+    return ChatResponse(
+        answer=raw,
+        sources=list({c.source for c in chunks}),
+        confidence=0.7,  # placeholder; real confidence comes with CRAG (L5)
+        metadata=ResponseMetadata(
+            route="rag",
+            retrieved_chunks=chunk_previews,
         ),
-        "top_k": int(flags.get("top_k", 5)),
-    }
-    cached = query_cache.get_rag_answer(question, cache_context)
-    if cached is not None:
-        response = ChatResponse(**cached)
-        response.cache_hit = True
-        return response
+    )
 
-    chunks = _retrieve(question, flags)
-    validated = _generate(question, chunks, flags)
-    query_cache.set_rag_answer(question, validated.model_dump(), cache_context)
-    return validated
+
+def _top_k_from_flags(flags: dict | int | None) -> int:
+    """Accept either a flags dict (eval profile) or a bare int."""
+    if flags is None:
+        return 5
+    if isinstance(flags, int):
+        return flags
+    return int(flags.get("top_k", 5))
+
+
+def run_rag(question: str, flags: dict | int | None = None) -> ChatResponse:
+    """Run the naive RAG pipeline: retrieve → generate.
+
+    Accepts a flags dict (e.g. from an eval profile) for forward
+    compatibility, but in L1 only the `top_k` key is used. All other
+    flags (search_mode/enable_hyde/...) are silently ignored.
+    """
+    top_k = _top_k_from_flags(flags)
+    logger.info("L1 naive RAG | top_k={}", top_k)
+    chunks = _retrieve(question, top_k=top_k)
+    return _generate(question, chunks)
 
 
 def run_rag_with_trace(
-    question: str,
-    flags: dict | None = None,
+    question: str, flags: dict | int | None = None
 ) -> tuple[ChatResponse, list[RetrievedChunk]]:
-    """Production-grade RAG that also returns the chunks used for tracing.
-
-    Mirrors run_rag's caching behavior (5-tier query cache) so that the API
-    path through the LangGraph benefits from cache hits.  On a cache hit,
-    the returned chunks list is empty (the answer is what's cached, not
-    the upstream retrieval) — callers must handle this gracefully.
-
-    Steps:
-        1. Compute cache key from (question, flags subset)
-        2. Cache lookup → on hit, set response.cache_hit=True and return
-        3. On miss: retrieve → rerank → CRAG → generate → cache → return
-    """
-    flags = flags or {}
-    cache_context = {
-        "search_mode": flags.get("search_mode", "dense"),
-        "enable_hyde": bool(flags.get("enable_hyde", False)),
-        "enable_rerank": bool(flags.get("enable_rerank", True)),
-        "enable_crag": bool(flags.get("enable_crag", settings.crag_enabled_by_default)),
-        "enable_self_reflective": bool(
-            flags.get("enable_self_reflective", settings.self_reflective_enabled_by_default)
-        ),
-        "top_k": int(flags.get("top_k", 5)),
-    }
-    cached = query_cache.get_rag_answer(question, cache_context)
-    if cached is not None:
-        response = ChatResponse(**cached)
-        response.cache_hit = True
-        # No chunks available on cache hit — the cached payload is the answer
-        # itself, not the upstream retrieval state.  Callers that need the
-        # retrieved chunks should bypass cache via run_rag_with_trace_no_cache().
-        return response, []
-
-    chunks = _retrieve(question, flags)
-    validated = _generate(question, chunks, flags)
-    query_cache.set_rag_answer(question, validated.model_dump(), cache_context)
-    return validated, chunks
+    """Eval-friendly variant that also returns the raw chunks."""
+    top_k = _top_k_from_flags(flags)
+    chunks = _retrieve(question, top_k=top_k)
+    response = _generate(question, chunks)
+    return response, chunks
 
 
-def run_rag_with_trace_no_cache(
-    question: str,
-    flags: dict | None = None,
-) -> tuple[ChatResponse, list[RetrievedChunk]]:
-    """Eval-only variant that bypasses the cache.  Use for offline eval and
-    diagnostic tooling where you need a guaranteed fresh retrieve+generate.
-    """
-    flags = flags or {}
-    chunks = _retrieve(question, flags)
-    validated = _generate(question, chunks, flags)
-    return validated, chunks
+# Eval expects this exact name so it can bypass any cache layer added later.
+run_rag_with_trace_no_cache = run_rag_with_trace

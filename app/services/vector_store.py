@@ -1,4 +1,9 @@
-"""Qdrant vector store — dense-only search for Phase 1."""
+"""Vector store — Lesson 1: dense search only.
+
+Sparse + hybrid (RRF) search are added in Lesson 2 (lesson-2-hybrid).
+"""
+
+from __future__ import annotations
 
 import uuid
 
@@ -8,136 +13,54 @@ from qdrant_client.models import Distance, PointStruct, VectorParams
 from app.config import settings
 from app.models import RetrievedChunk
 
-_client: QdrantClient | None = None
+VECTOR_SIZE = 1536  # text-embedding-3-small
 
 
 def get_client() -> QdrantClient:
-    global _client
-    if _client is None:
-        _client = QdrantClient(url=settings.qdrant_url)
-    return _client
+    return QdrantClient(url=settings.qdrant_url, timeout=30)
 
 
 def ensure_collection() -> None:
+    """Create the documents collection if it doesn't exist."""
     client = get_client()
-    if not client.collection_exists(settings.qdrant_collection):
+    existing = {c.name for c in client.get_collections().collections}
+    if settings.qdrant_collection not in existing:
         client.create_collection(
             collection_name=settings.qdrant_collection,
-            vectors_config=VectorParams(
-                size=1536,
-                distance=Distance.COSINE,
-            ),
+            vectors_config=VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE),
         )
 
 
 def upsert_chunks(chunks: list[RetrievedChunk], embeddings: list[list[float]]) -> None:
-    """Upsert chunks with their embeddings into Qdrant."""
+    """Insert/replace chunks with their embeddings in Qdrant."""
     ensure_collection()
     client = get_client()
-    points = []
-    for i, (chunk, vec) in enumerate(zip(chunks, embeddings, strict=True)):
-        point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{chunk.source}:{i}:{chunk.text[:50]}"))
-        points.append(
-            PointStruct(
-                id=point_id,
-                vector=vec,
-                payload={
-                    "text": chunk.text,
-                    "source": chunk.source,
-                },
-            )
+    points = [
+        PointStruct(
+            id=str(uuid.uuid4()),
+            vector=embedding,
+            payload={"text": chunk.text, "source": chunk.source},
         )
+        for chunk, embedding in zip(chunks, embeddings, strict=True)
+    ]
     client.upsert(collection_name=settings.qdrant_collection, points=points)
 
 
 def search(query_embedding: list[float], top_k: int = 5) -> list[RetrievedChunk]:
-    """Search Qdrant for the top-k most similar chunks."""
+    """Dense vector search via Qdrant cosine similarity."""
     client = get_client()
-    ensure_collection()
+    results = client.query_points(
+        collection_name=settings.qdrant_collection,
+        query=query_embedding,
+        limit=top_k,
+        with_payload=True,
+    ).points
 
-    # qdrant-client changed dense search API from `search` to `query_points`
-    # in newer versions. Support both to stay compatible across environments.
-    if hasattr(client, "query_points"):
-        query_result = client.query_points(
-            collection_name=settings.qdrant_collection,
-            query=query_embedding,
-            limit=top_k,
-            with_payload=True,
-        )
-        results = query_result.points
-    else:
-        results = client.search(
-            collection_name=settings.qdrant_collection,
-            query_vector=query_embedding,
-            limit=top_k,
-            with_payload=True,
-        )
     return [
         RetrievedChunk(
-            text=hit.payload.get("text", ""),
-            source=hit.payload.get("source", ""),
-            score=hit.score,
+            text=p.payload.get("text", ""),
+            source=p.payload.get("source", ""),
+            score=float(p.score),
         )
-        for hit in results
+        for p in results
     ]
-
-
-def _build_sparse_index():
-    """Scroll Qdrant and build an in-memory TF-IDF sparse index."""
-    from app.services.sparse_vector_service import SparseVectorIndex
-
-    client = get_client()
-    all_points, _next_page = client.scroll(
-        collection_name=settings.qdrant_collection,
-        limit=10000,
-        with_payload=True,
-        with_vectors=False,
-    )
-
-    documents = [
-        {
-            "text": point.payload.get("text", "") if point.payload else "",
-            "source": point.payload.get("source", "") if point.payload else "",
-            "id": str(point.id),
-        }
-        for point in all_points
-    ]
-
-    sparse_index = SparseVectorIndex()
-    sparse_index.fit(documents)
-    return sparse_index
-
-
-def sparse_search(query_text: str, top_k: int = 5) -> list[RetrievedChunk]:
-    """Pure sparse search using TF-IDF (no dense embeddings, no RRF fusion)."""
-    sparse_index = _build_sparse_index()
-    return sparse_index.search(query_text, top_k=top_k)
-
-
-def hybrid_search(
-    query_embedding: list[float],
-    query_text: str,
-    top_k: int = 5,
-    rrf_k: int = 60,
-    sparse_top_k: int = 20,
-) -> list[RetrievedChunk]:
-    """Hybrid search: dense (Qdrant) + sparse (TF-IDF) fused with RRF.
-
-    1. Get dense results from Qdrant
-    2. Build sparse index from all Qdrant points (scroll collection)
-    3. Get sparse results from TF-IDF
-    4. Fuse with RRF: score = sum(1 / (rrf_k + rank)) for each result set
-    5. Return top_k fused results sorted by RRF score
-    """
-    from app.services.sparse_vector_service import fuse_rrf
-
-    # 1. Dense results
-    dense_results = search(query_embedding, top_k=sparse_top_k)
-
-    # 2-4. Sparse results
-    sparse_index = _build_sparse_index()
-    sparse_results = sparse_index.search(query_text, top_k=sparse_top_k)
-
-    # 5. Fuse and return top_k
-    fused = fuse_rrf([dense_results, sparse_results], rrf_k=rrf_k)
-    return fused[:top_k]

@@ -1,13 +1,13 @@
 """FastAPI application entry point.
 
-Lesson 0 — bare infra. Only auth + admin endpoints are wired.
-The /query, /upload, /chat routers are added in Lesson 1+.
+Lesson 1 — auth + admin + naive RAG /query.
 """
 
 from fastapi import FastAPI
 
-from app.api import admin, auth
+from app.api import admin, auth, query
 
-app = FastAPI(title="ADV RAG", version="0.1.0-lesson-0")
+app = FastAPI(title="ADV RAG", version="0.1.0-lesson-1")
 app.include_router(admin.router)
 app.include_router(auth.router)
+app.include_router(query.router)

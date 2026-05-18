@@ -1,7 +1,10 @@
-"""Pydantic models for requests, responses, and internal data shapes."""
+"""Pydantic models for requests, responses, and internal data shapes.
+
+Lesson 1 — naive RAG only. Advanced flags (search_mode/hyde/rerank/crag/
+self_reflective) + SQL/CRAG/Reflection models come in L2-L7.
+"""
 
 import re
-from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -37,12 +40,6 @@ class ChatRequest(BaseModel):
         return v
 
 
-class PendingSQLBlock(BaseModel):
-    sql: str
-    query_id: str
-    explanation: str
-
-
 class RetrievedChunkPreview(BaseModel):
     """Compact view of a retrieved chunk surfaced to the API/UI."""
 
@@ -52,38 +49,34 @@ class RetrievedChunkPreview(BaseModel):
 
 
 class ResponseMetadata(BaseModel):
-    restructure_method: str = "original"
-    validation_attempts: int = 0
     route: str = "rag"
     retrieved_chunks: list[RetrievedChunkPreview] = Field(default_factory=list)
-    # Self-RAG / reflection telemetry
-    reflection_iterations: int = 0
-    reflection_score: float | None = None
-    refined_question: str | None = None
 
 
 class ChatResponse(BaseModel):
     answer: str = Field(..., min_length=0)
     sources: list[str] = Field(default_factory=list)
     confidence: float = Field(..., ge=0.0, le=1.0)
-    cache_hit: bool = False
-    cost_saved: str = "$0.00"
-    pending_sql: PendingSQLBlock | None = None
     metadata: ResponseMetadata = Field(default_factory=ResponseMetadata)
 
 
 class QueryRequest(BaseModel):
+    """L1 QueryRequest — only `question` + `top_k`.
+
+    Advanced retrieval flags are added per-lesson:
+      - L2: search_mode (dense | sparse | hybrid)
+      - L3: enable_rerank
+      - L4: enable_hyde
+      - L5: enable_crag
+      - L6: enable_self_reflective
+    """
+
     question: str = Field(
         ...,
         min_length=1,
         max_length=2000,
         description="User question",
     )
-    enable_hyde: bool = False
-    enable_rerank: bool = True
-    enable_crag: bool = True
-    enable_self_reflective: bool = False
-    search_mode: Literal["dense", "sparse", "hybrid"] = "hybrid"
     top_k: int = Field(default=5, ge=1, le=50)
 
     @field_validator("question")
@@ -113,17 +106,3 @@ class RetrievedChunk(BaseModel):
     text: str
     source: str
     score: float = 0.0
-
-
-class CRAGEvaluation(BaseModel):
-    relevance_score: float = 0.0
-    relevance_label: str = ""
-    confidence: float = 0.0
-    reasoning: str = ""
-
-
-class ReflectionResult(BaseModel):
-    reflection_score: float = 0.0
-    needs_regeneration: bool = False
-    refined_question: str = ""
-    reasoning: str = ""
