@@ -35,6 +35,7 @@ MODULES = [
     "app.services.hyde",
     "app.services.crag",
     "app.services.web_search",
+    "app.services.self_reflective",
     "app.services.document_processor",
     "app.services.llm_service",
     "app.services.rag_service",

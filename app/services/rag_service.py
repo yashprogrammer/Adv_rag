@@ -1,13 +1,11 @@
-"""RAG service — Lesson 5: + CRAG corrective grading + web fallback.
+"""RAG service — Lesson 6: + Self-RAG reflection loop.
 
-L4 had dense/sparse/hybrid + rerank + HyDE. L5 adds CRAG:
-  1. After retrieval, an LLM grader scores the chunks' relevance.
-  2. If score < threshold AND not flagged ambiguous, fall back to a
-     Tavily web search and REPLACE the chunks.
-  3. If ambiguous, keep the original chunks but flag low confidence.
+L5 added CRAG (corrective retrieval). L6 adds reflection on the GENERATED
+answer: after the first draft, an LLM grader scores quality. If too low,
+the question is refined and the pipeline reruns (up to N retries).
 
 Flag added in this lesson:
-  enable_crag: bool   (default True at the service level)
+  enable_self_reflective: bool  (default False)
 """
 
 from __future__ import annotations
@@ -28,6 +26,7 @@ from app.services.embedding_service import embed_texts
 from app.services.hyde import HyDERetriever
 from app.services.llm_service import generate
 from app.services.reranking import Reranker
+from app.services.self_reflective import reflect_on_answer, should_regenerate
 from app.services.vector_store import hybrid_search, search, sparse_search
 
 
@@ -62,8 +61,6 @@ def _retrieve(question: str, flags: dict | None = None) -> list[RetrievedChunk]:
     else:
         chunks = chunks[:final_top_k]
 
-    # CRAG: grade chunks; on low relevance, replace with Tavily web search.
-    # Returns (chunks, evaluation, web_fallback_used) — we only need chunks here.
     if crag and chunks:
         chunks, _eval, _used_web = crag_pipeline(
             question=question,
@@ -74,11 +71,41 @@ def _retrieve(question: str, flags: dict | None = None) -> list[RetrievedChunk]:
     return chunks
 
 
-def _generate(question: str, chunks: list[RetrievedChunk]) -> ChatResponse:
+def _generate(
+    question: str,
+    chunks: list[RetrievedChunk],
+    flags: dict | None = None,
+) -> ChatResponse:
+    enable_self_reflective = bool(_flag(flags, "enable_self_reflective", False))
+
     spotlighted = build_spotlighted_context(chunks)
     system = build_system_prompt()
-    user_msg = f"{spotlighted}\n\nQuestion: {question}"
-    raw = generate(system, user_msg)["text"]
+
+    def _raw(q: str) -> str:
+        return generate(system, f"{spotlighted}\n\nQuestion: {q}")["text"]
+
+    working_q = question
+    raw = _raw(working_q)
+
+    # Self-RAG: reflect on the answer; refine the question and retry if weak.
+    iterations = 0
+    last_score: float | None = None
+    final_refined: str | None = None
+    if enable_self_reflective:
+        while True:
+            reflection = reflect_on_answer(
+                question=working_q,
+                answer=raw,
+                context=spotlighted,
+            )
+            last_score = float(reflection.reflection_score)
+            if not should_regenerate(reflection, iterations):
+                break
+            final_refined = reflection.refined_question or working_q
+            working_q = final_refined
+            raw = _raw(working_q)
+            iterations += 1
+
     chunk_previews = [
         RetrievedChunkPreview(text=c.text, source=c.source, score=c.score) for c in chunks
     ]
@@ -86,28 +113,35 @@ def _generate(question: str, chunks: list[RetrievedChunk]) -> ChatResponse:
         answer=raw,
         sources=list({c.source for c in chunks}),
         confidence=0.7,
-        metadata=ResponseMetadata(route="rag", retrieved_chunks=chunk_previews),
+        metadata=ResponseMetadata(
+            route="rag",
+            retrieved_chunks=chunk_previews,
+            reflection_iterations=iterations,
+            reflection_score=last_score,
+            refined_question=final_refined,
+        ),
     )
 
 
 def run_rag(question: str, flags: dict | int | None = None) -> ChatResponse:
     logger.info(
-        "L5 RAG | mode={} rerank={} hyde={} crag={} top_k={}",
+        "L6 RAG | mode={} rerank={} hyde={} crag={} self_rag={} top_k={}",
         _flag(flags, "search_mode", "dense"),
         _flag(flags, "enable_rerank", False),
         _flag(flags, "enable_hyde", False),
         _flag(flags, "enable_crag", settings.crag_enabled_by_default),
+        _flag(flags, "enable_self_reflective", False),
         int(_flag(flags, "top_k", 5)),
     )
     chunks = _retrieve(question, flags=flags if isinstance(flags, dict) else None)
-    return _generate(question, chunks)
+    return _generate(question, chunks, flags=flags if isinstance(flags, dict) else None)
 
 
 def run_rag_with_trace(
     question: str, flags: dict | int | None = None
 ) -> tuple[ChatResponse, list[RetrievedChunk]]:
     chunks = _retrieve(question, flags=flags if isinstance(flags, dict) else None)
-    response = _generate(question, chunks)
+    response = _generate(question, chunks, flags=flags if isinstance(flags, dict) else None)
     return response, chunks
 
 

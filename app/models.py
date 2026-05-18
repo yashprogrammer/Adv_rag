@@ -52,6 +52,10 @@ class RetrievedChunkPreview(BaseModel):
 class ResponseMetadata(BaseModel):
     route: str = "rag"
     retrieved_chunks: list[RetrievedChunkPreview] = Field(default_factory=list)
+    # Self-RAG / reflection telemetry (populated when enable_self_reflective=True)
+    reflection_iterations: int = 0
+    reflection_score: float | None = None
+    refined_question: str | None = None
 
 
 class ChatResponse(BaseModel):
@@ -83,6 +87,7 @@ class QueryRequest(BaseModel):
     enable_rerank: bool = False
     enable_hyde: bool = False
     enable_crag: bool = True
+    enable_self_reflective: bool = False
     top_k: int = Field(default=5, ge=1, le=50)
 
     @field_validator("question")
@@ -120,4 +125,13 @@ class CRAGEvaluation(BaseModel):
     relevance_score: float = 0.0
     relevance_label: str = ""  # "highly_relevant" | "somewhat_relevant" | "ambiguous" | "irrelevant"
     confidence: float = 0.0
+    reasoning: str = ""
+
+
+class ReflectionResult(BaseModel):
+    """Self-RAG reflection on a generated answer."""
+
+    reflection_score: float = 0.0
+    needs_regeneration: bool = False
+    refined_question: str = ""
     reasoning: str = ""
