@@ -290,7 +290,7 @@
     - tavily_web
   golden_answer_keywords:
     - kubernetes
-    - 1.34
+    - "1.34"
   demonstrates_feature: crag
   expected_baseline: fail
   expected_with_feature: pass
