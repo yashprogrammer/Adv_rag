@@ -1,164 +1,181 @@
-# Lesson 6 — Self-RAG (Reflect-Refine Cycle)
+# Lesson 7 — Text2SQL Routing (LLM Intent Router + Vanna AI)
 
-> **Eval target:** 78% → 87%
-> **Branch:** `lesson-6-self-rag`  ·  **Previous lesson:** `lesson-5-crag`
+> **Eval target:** 87% → 95%
+> **Branch:** `lesson-7-text2sql`  ·  **Previous lesson:** `lesson-6-self-rag`
 
 ## What you'll build
 
-A post-generation reflection loop in `app/services/self_reflective.py`: after the LLM produces an answer, a strict LLM reviewer scores it on relevance, accuracy, completeness, and clarity (each 1–10). If the overall reflection score is below `0.85` — or the answer hedges/refuses — `should_regenerate()` returns `True`, and the system replaces the original question with a sharper `refined_question` and re-retrieves. Bounded to 2 retries. The refinement and iteration count surface in response metadata as `refined_question` and `reflection_iterations`.
+An LLM-based intent router (`classify_intent()` in `app/services/router_service.py`) that classifies every question as `sql`, `rag`, or `hybrid`. SQL questions flow through `app/services/sql_service.py` (Vanna AI + schema introspection), pause at a `interrupt()` checkpoint for human SQL approval, then execute `SELECT`-only against the K8s ops Postgres database. The result is returned as structured data alongside a natural-language answer. Hybrid fan-out queries get both SQL rows and RAG chunks merged in a single response.
 
 ## Why this feature — the pain from last lesson
 
-After L5, retrieval is accurate and CRAG handles out-of-distribution gaps. But vague queries like `"how do i scale"` (golden q-015, q-016) still produce shallow answers — the retriever gets lucky and finds *some* pods/deployment docs, but the LLM produces a generic one-liner because the question is underspecified. CRAG only checks retrieval quality; it cannot detect a generated answer that hedges or misses depth. Self-RAG catches that by reflecting on the output.
+After L6, all RAG features are on. Golden questions q-017 and q-018 (`"How many P1 incidents were resolved in the last quarter?"`, `"Which cluster currently has the most pods in CrashLoopBackOff status?"`) still fail — they require `COUNT`, `JOIN`, and `WHERE` against the K8s ops database. These answers are not in any document; they live in 50K rows of operational data. RAG cannot answer them.
 
 ## Pipeline diagram (before → after)
 
 ```mermaid
 flowchart TD
     Q[User question]
-    R[Retrieve + CRAG]
-    Q --> R
 
-    subgraph Before["L5 — one-shot generation"]
-        R --> GEN5[generate_answer]
-        GEN5 --> A5["Generic / shallow answer\nno retry"]
+    subgraph Before["L6 — everything routes to RAG"]
+        Q --> RAG6[Retrieve + CRAG + Self-RAG]
+        RAG6 --> A6["'I don't have that data'\nor hallucinated count"]
     end
 
-    subgraph After["L6 — Self-RAG ✦ new"]
-        R --> GEN6[generate_answer\nattempt 1]
-        GEN6 --> REF{Reflection\nscore ≥ 0.85?}
-        REF -->|yes| DONE[Return answer]
-        REF -->|no\nmax 2 retries| REFQ[Refine question\ne.g. 'How do I scale a Kubernetes Deployment\nusing HPA?']
-        REFQ --> R2[Re-retrieve with\nrefined question]
-        R2 --> GEN6
+    subgraph After["L7 — Intent router ✦ new"]
+        Q --> ROUTER{LLM intent\nclassifier\n24h cached}
+        ROUTER -->|rag| RAG7[RAG pipeline\nhybrid+rerank+crag+srag]
+        ROUTER -->|sql| SQL7[SQL pipeline]
+        ROUTER -->|hybrid| BOTH7[Fan-out: RAG + SQL]
+
+        subgraph SQL7["SQL pipeline"]
+            direction TB
+            GEN[Vanna: generate SQL\nSELECT-only enforced]
+            INTR[interrupt — human approval\nPOST /query/sql/execute]
+            EXEC[Execute against\nK8s ops Postgres]
+            GEN --> INTR --> EXEC
+        end
+
+        SQL7 --> A7[Structured answer\n+ row data]
+        BOTH7 --> MERGE[_generate_hybrid_answer\nSQL rows + RAG docs merged]
     end
 
     style After fill:#e8f5e9
-    style REF fill:#fff9c4
-    style REFQ fill:#fff9c4
+    style ROUTER fill:#fff9c4
+    style SQL7 fill:#e3f2fd
+    style MERGE fill:#fff9c4
 ```
 
 ## Files you're adding
 
-- `tests/unit/test_self_reflective.py`
-- `eval/results/lesson-6-baseline.json`
+- `tests/unit/test_router_service.py`
+- `eval/results/lesson-7-baseline.json`
 
 ## Files you're modifying
 
-- `app/services/self_reflective.py` — `reflect_on_answer()`, `should_regenerate()` (already present; trace both)
-- `app/services/rag_service.py` — the `_generate()` function wraps generation in the Self-RAG loop
-- `app/models.py` — `enable_self_reflective: bool = False` (students flip to `True`)
+- `app/services/router_service.py` — `classify_intent()` (already present; trace the LLM call and 24h cache)
+- `app/services/sql_service.py` — Vanna integration + `generate_sql()` + `execute_sql()` (already present)
+- `app/core/graph.py` — `route_intent`, `generate_sql_node`, `execute_sql`, `request_sql_approval` nodes (already present)
+- `app/api/query.py` — `POST /query/sql/execute` endpoint (already present)
 
 ## Step-by-step build
 
-1. **Inspect `reflect_on_answer()` in `self_reflective.py`.**
-   The function sends the question, answer, and retrieved context to `gpt-4o-mini` (the grader model) with a strict rubric. Key fields in the returned `ReflectionResult`:
-   - `reflection_score: float` (0.0–1.0)
-   - `needs_regeneration: bool` (true if score < 0.85 or any criterion ≤ 5)
-   - `refined_question: str` (the sharper reformulation when regeneration is needed)
+1. **Trace `classify_intent()` in `router_service.py`.**
+   The function sends the question to GPT-4o with a K8s-domain system prompt enumerating the SQL schema tables (`clusters`, `nodes`, `pods`, `deployments`, `incidents`, `alerts`, `oncall_logs`) and returns `"sql"`, `"rag"`, or `"hybrid"`. Result is Redis-cached for 24 h.
 
-2. **Inspect `should_regenerate()` logic.**
-   ```python
-   def should_regenerate(result: ReflectionResult, iteration: int, max_iterations: int = 2) -> bool:
-       return result.needs_regeneration and iteration < max_iterations
-   ```
+2. **Trace the SQL subgraph in `graph.py`.**
+   Key nodes: `route_intent → generate_sql_node → request_sql_approval` (interrupt) → `execute_sql → finalize`.
+   The `interrupt()` call pauses the LangGraph checkpointer at SQL approval, returning `route: "sql"` and `pending_sql` to the caller.
 
-3. **Trace the reflection loop in `_generate()` in `rag_service.py`.**
-   The existing implementation wraps generation in a loop:
-   ```python
-   for iteration in range(settings.self_rag_max_iterations + 1):
-       response = _generate_once(question, chunks, flags)
-       if not enable_self_reflective:
-           break
-       reflection = reflect_on_answer(question, response.answer, context=spotlighted)
-       if not should_regenerate(reflection, iteration):
-           break
-       question = reflection.refined_question   # re-retrieve with better question
-       chunks = _retrieve(question, flags)
-   response.metadata["reflection_iterations"] = iteration
-   response.metadata["refined_question"] = reflection.refined_question if iteration > 0 else None
-   ```
+3. **Inspect `generate_sql()` in `sql_service.py`.**
+   Vanna introspects `information_schema` at startup to build a schema string. Only `SELECT` statements pass the safety check; `INSERT`, `UPDATE`, `DELETE`, `DROP` raise `ValueError`.
 
-4. **Write a unit test for the reflection loop.**
-   Create `tests/unit/test_self_reflective.py`:
+4. **Write a unit test for intent routing.**
+   Create `tests/unit/test_router_service.py`:
    ```python
    from unittest.mock import patch
-   from app.models import ReflectionResult
-   from app.services.self_reflective import should_regenerate, reflect_on_answer
+   from app.services.router_service import classify_intent
 
-   def test_should_regenerate_respects_max_iterations():
-       result = ReflectionResult(reflection_score=0.5, needs_regeneration=True,
-                                  refined_question="better q", reasoning="too vague")
-       assert should_regenerate(result, iteration=0, max_iterations=2) is True
-       assert should_regenerate(result, iteration=2, max_iterations=2) is False
+   def test_sql_intent_for_count_question():
+       with patch("app.services.router_service.generate_with_json") as mg, \
+            patch("app.services.router_service.query_cache") as mc:
+           mc.get_intent.return_value = None
+           mg.return_value = {"text": '{"intent": "sql"}', "model": "gpt-4o"}
+           result = classify_intent("How many P1 incidents last month?")
+           assert result == "sql"
 
-   def test_no_regeneration_when_score_high():
-       result = ReflectionResult(reflection_score=0.92, needs_regeneration=False,
-                                  refined_question="", reasoning="good answer")
-       assert should_regenerate(result, iteration=0) is False
+   def test_rag_intent_for_concept_question():
+       with patch("app.services.router_service.generate_with_json") as mg, \
+            patch("app.services.router_service.query_cache") as mc:
+           mc.get_intent.return_value = None
+           mg.return_value = {"text": '{"intent": "rag"}', "model": "gpt-4o"}
+           result = classify_intent("What is a Kubernetes Deployment?")
+           assert result == "rag"
    ```
-   Run: `uv run pytest tests/unit/test_self_reflective.py -v`
+   Run: `uv run pytest tests/unit/test_router_service.py -v`
 
-5. **Manually test with the vague query.**
-   In Streamlit (`make streamlit`), enable Self-Reflective toggle and run `"how do i scale"`. Watch the metadata panel for `reflection_iterations: 2` and `refined_question`.
+5. **Run the two-step SQL demo end-to-end.**
 
-6. **Run the full eval and save the artifact.**
+   Step A — generate SQL:
    ```bash
-   make eval-all
+   RESPONSE=$(curl -sX POST http://localhost:8000/query \
+     -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+     -d '{"question":"How many P1 incidents occurred in production clusters in the last 30 days?",
+          "search_mode":"hybrid","enable_rerank":true}')
+   echo $RESPONSE | jq '.route, .pending_sql'
+   QUERY_ID=$(echo $RESPONSE | jq -r '.query_id')
+   ```
+
+   Step B — approve and execute:
+   ```bash
+   curl -sX POST http://localhost:8000/query/sql/execute \
+     -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+     -d "{\"query_id\":\"$QUERY_ID\",\"approved\":true}" | jq '.answer'
+   ```
+
+6. **Run the eval and save the artifact.**
+   ```bash
+   uv run python -m eval.run_ragas --profile all
    cp eval/results/$(ls -t eval/results/*_all.json | head -1 | xargs basename) \
-      eval/results/lesson-6-baseline.json
+      eval/results/lesson-7-baseline.json
    ```
 
 ## Verification
 
-### Quick smoke test
+### Quick smoke test — SQL route
 
 ```bash
-# Without Self-RAG
 curl -sX POST http://localhost:8000/query \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"question":"how do i scale","search_mode":"hybrid","enable_rerank":true,
-       "enable_self_reflective":false,"top_k":5}' \
-  | jq '.answer, .metadata.reflection_iterations, .metadata.refined_question'
+  -d '{
+    "question": "How many P1 incidents occurred in production clusters in the last 30 days?",
+    "search_mode": "hybrid",
+    "enable_rerank": true,
+    "enable_hyde": false,
+    "enable_crag": false,
+    "enable_self_reflective": false,
+    "top_k": 5
+  }' | jq '.route, .pending_sql'
 ```
 
-Expected: generic `kubectl scale ...` answer. `reflection_iterations: 0`, `refined_question: null`.
+Expected: `"route": "sql"`. `pending_sql` contains a valid `SELECT COUNT(*) ... FROM incidents JOIN clusters ...` statement.
+
+### Contrast — RAG route
 
 ```bash
-# With Self-RAG
 curl -sX POST http://localhost:8000/query \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"question":"how do i scale","search_mode":"hybrid","enable_rerank":true,
-       "enable_self_reflective":true,"top_k":5}' \
-  | jq '.answer, .metadata.reflection_iterations, .metadata.refined_question'
+  -d '{"question":"What is the Kubernetes incident response best practice?",
+       "search_mode":"hybrid","enable_rerank":true}' \
+  | jq '.route'
 ```
 
-Expected: richer answer covering HPA, manual `kubectl scale`, and `replicas`. `reflection_iterations: 2`. `refined_question` shows the system's internally generated better question (e.g., `"How do I scale a Kubernetes Deployment using HPA?"`).
+Expected: `"route": "rag"`. Proves the router is domain-aware, not just matching keywords.
 
 ### Eval check
 
 ```bash
-make eval-all
 uv run python -m eval.run_ragas --profile all
 ```
 
-Expected: `answer_relevancy ~87%` across all questions. Diff vs L5:
+Expected: `context_recall ~95%` across all 21 golden questions. Diff vs L6:
 
 ```bash
 uv run python -m eval.diff \
-  eval/results/lesson-5-baseline.json \
-  eval/results/lesson-6-baseline.json
+  eval/results/lesson-6-baseline.json \
+  eval/results/lesson-7-baseline.json
 ```
 
-Expected: `answer_relevancy +9pp` on vague/underspecified golden questions (q-015, q-016). Latency increase on vague queries: `+8–10 s` (2 extra reflection + retrieval calls).
+Expected: `answer_relevancy +8pp` driven by SQL questions (q-017, q-018) now answering correctly.
 
 ## What's next
 
-L7 adds the Text2SQL router. Even with all retrieval features on, questions like `"How many P1 incidents occurred in production clusters in the last 30 days?"` cannot be answered from documents — the answer lives in the K8s ops database. L7 adds an LLM-based intent classifier that routes such questions to Vanna AI for SQL generation, human approval, and execution. Eval jumps to ~95%.
+L8 adds the five-tier caching layer. The eval score does not change (all questions still answered correctly), but repeated queries become drastically cheaper and faster: same question twice costs ~2.7× less time and zero additional OpenAI tokens on the second call.
 
 ## References
 
-- `DEMO_VIDEO_SCRIPT.md` section 7 (Self-RAG demo, `"how do i scale"` query)
+- `DEMO_VIDEO_SCRIPT.md` section 8 (Text2SQL demo, P1 incidents query + two-step flow)
 - `eval/profiles.py` — `all` profile
-- `app/services/self_reflective.py` — `reflect_on_answer()`, `should_regenerate()`
-- Asai et al. (2023) — "Self-RAG: Learning to Retrieve, Generate, and Critique through Self-Reflection"
+- `app/services/router_service.py` — `classify_intent()`
+- `app/services/sql_service.py` — Vanna + `generate_sql()`, `execute_sql()`
+- `app/core/graph.py` — `request_sql_approval` interrupt node

@@ -39,9 +39,13 @@ class Invoker(ABC):
 
 
 class ServiceInvoker(Invoker):
-    """Phase A — direct in-process call. SQL & hybrid intents are skipped."""
+    """Phase A — direct in-process call.
 
-    SUPPORTED_INTENTS = {"rag", "web_fallback"}
+    Lesson 7 unlocks the SQL + hybrid intents (auto-route via the intent
+    classifier in run_rag_with_trace_no_cache).
+    """
+
+    SUPPORTED_INTENTS = {"rag", "web_fallback", "sql", "hybrid"}
 
     def invoke(
         self, question: str, flags: dict, intent: str
@@ -49,12 +53,9 @@ class ServiceInvoker(Invoker):
         if intent not in self.SUPPORTED_INTENTS:
             raise SkippedIntent(f"intent={intent} not supported in service mode")
 
-        # Skip CRAG web_fallback goldens if Tavily key is missing
         if intent == "web_fallback" and not settings.tavily_api_key:
             raise SkippedIntent("tavily_unset: TAVILY_API_KEY not configured")
 
-        # Eval always bypasses the answer cache — each golden must produce
-        # a fresh retrieve+generate so scores reflect current pipeline state.
         return run_rag_with_trace_no_cache(question, flags)
 
 
