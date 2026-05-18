@@ -1,13 +1,13 @@
-"""RAG service — Lesson 4: + HyDE.
+"""RAG service — Lesson 5: + CRAG corrective grading + web fallback.
 
-L3 had dense/sparse/hybrid + reranking. L4 adds HyDE (Hypothetical Document
-Embeddings): when `enable_hyde=True`, we ask the LLM to draft a plausible
-answer first, then search using THAT draft's embedding (deduplicated with
-the original question's embedding). This bridges vocabulary gaps where the
-user's words don't match the documentation.
+L4 had dense/sparse/hybrid + rerank + HyDE. L5 adds CRAG:
+  1. After retrieval, an LLM grader scores the chunks' relevance.
+  2. If score < threshold AND not flagged ambiguous, fall back to a
+     Tavily web search and REPLACE the chunks.
+  3. If ambiguous, keep the original chunks but flag low confidence.
 
 Flag added in this lesson:
-  enable_hyde: bool   (default False)
+  enable_crag: bool   (default True at the service level)
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from app.models import (
 )
 from app.security.spotlighting import build_spotlighted_context
 from app.security.system_prompt import build_system_prompt
+from app.services.crag import crag_pipeline
 from app.services.embedding_service import embed_texts
 from app.services.hyde import HyDERetriever
 from app.services.llm_service import generate
@@ -41,11 +42,10 @@ def _retrieve(question: str, flags: dict | None = None) -> list[RetrievedChunk]:
     mode = _flag(flags, "search_mode", "dense")
     rerank = bool(_flag(flags, "enable_rerank", False))
     hyde = bool(_flag(flags, "enable_hyde", False))
+    crag = bool(_flag(flags, "enable_crag", settings.crag_enabled_by_default))
 
     retrieve_k = settings.reranker_initial_top_k if rerank else final_top_k
 
-    # HyDE overrides the search_mode branch — it generates hypothetical
-    # answers and does its own multi-vector dense retrieval internally.
     if hyde:
         chunks = HyDERetriever().retrieve(question, top_k=retrieve_k)
     elif mode == "sparse":
@@ -61,6 +61,15 @@ def _retrieve(question: str, flags: dict | None = None) -> list[RetrievedChunk]:
         chunks = Reranker().rerank(question, chunks, top_k=final_top_k)
     else:
         chunks = chunks[:final_top_k]
+
+    # CRAG: grade chunks; on low relevance, replace with Tavily web search.
+    # Returns (chunks, evaluation, web_fallback_used) — we only need chunks here.
+    if crag and chunks:
+        chunks, _eval, _used_web = crag_pipeline(
+            question=question,
+            chunks=chunks,
+            enable_crag=True,
+        )
 
     return chunks
 
@@ -83,10 +92,11 @@ def _generate(question: str, chunks: list[RetrievedChunk]) -> ChatResponse:
 
 def run_rag(question: str, flags: dict | int | None = None) -> ChatResponse:
     logger.info(
-        "L4 RAG | mode={} rerank={} hyde={} top_k={}",
+        "L5 RAG | mode={} rerank={} hyde={} crag={} top_k={}",
         _flag(flags, "search_mode", "dense"),
         _flag(flags, "enable_rerank", False),
         _flag(flags, "enable_hyde", False),
+        _flag(flags, "enable_crag", settings.crag_enabled_by_default),
         int(_flag(flags, "top_k", 5)),
     )
     chunks = _retrieve(question, flags=flags if isinstance(flags, dict) else None)

@@ -82,6 +82,7 @@ class QueryRequest(BaseModel):
     search_mode: Literal["dense", "sparse", "hybrid"] = "dense"
     enable_rerank: bool = False
     enable_hyde: bool = False
+    enable_crag: bool = True
     top_k: int = Field(default=5, ge=1, le=50)
 
     @field_validator("question")
@@ -111,3 +112,12 @@ class RetrievedChunk(BaseModel):
     text: str
     source: str
     score: float = 0.0
+
+
+class CRAGEvaluation(BaseModel):
+    """Result of grading retrieved chunks against the user's question."""
+
+    relevance_score: float = 0.0
+    relevance_label: str = ""  # "highly_relevant" | "somewhat_relevant" | "ambiguous" | "irrelevant"
+    confidence: float = 0.0
+    reasoning: str = ""
