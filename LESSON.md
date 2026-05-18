@@ -1,152 +1,163 @@
-# Lesson 2 — Hybrid Search (Sparse + Dense + RRF)
+# Lesson 3 — Reranking (Cross-Encoder)
 
-> **Eval target:** 33% → 45%
-> **Branch:** `lesson-2-hybrid`  ·  **Previous lesson:** `lesson-1-naive-rag`
+> **Eval target:** 45% → 55%
+> **Branch:** `lesson-3-reranking`  ·  **Previous lesson:** `lesson-2-hybrid`
 
 ## What you'll build
 
-Parallel dense (OpenAI embeddings via Qdrant) and sparse (TF-IDF BM25 via `sparse_vector_service.py`) retrieval fused with Reciprocal Rank Fusion (RRF). Exact K8s tokens like `ErrImagePull`, `CrashLoopBackOff`, and `kubectl rollout` that dense smears over noisy embeddings will be pinned by BM25. Dense still captures semantic paraphrases like "how do I roll back?". RRF keeps the best of both without manual score calibration.
+A cross-encoder reranker (`ms-marco-MiniLM-L-6-v2` via `sentence-transformers`) that receives the hybrid top-20 candidate chunks and re-scores every (query, chunk) pair by reading them together — not independently. The top-5 surviving chunks are far more likely to contain the precise answer. Optionally, a Voyage AI backend can be swapped in for production.
 
 ## Why this feature — the pain from last lesson
 
-After L1, questions with literal K8s error tokens fail because dense embeddings blend `ErrImagePull` with loosely-related image/pull/registry content from academic noise docs. Golden question q-007 (`"What does error ErrImagePull mean and how do I fix it?"`) fails with `expected_baseline: fail`. BM25 would pin `troubleshooting-pods.html` immediately — but BM25 alone loses the semantic fallback for paraphrase queries. Hybrid with RRF gives both.
+After L2, hybrid retrieval surfaces the right documents, but precision in the top-5 is still shaky. Golden question q-009 (`"How long does a rolling update take in Kubernetes?"`) fails because noise docs containing "update" and "time" still land in the hybrid top-5 ahead of the `deployments.html` chunk that actually defines `maxSurge` and `maxUnavailable`. The bi-encoder (used in both dense and sparse retrieval) scores chunks independently; it cannot see whether the chunk actually *answers* the query. The cross-encoder does.
 
 ## Pipeline diagram (before → after)
 
 ```mermaid
-flowchart TD
+flowchart LR
     Q[User question]
 
-    subgraph Before["L1 — Dense only"]
-        DE1[Embed query] --> QD1[(Qdrant\ndense top-5)]
-        QD1 --> C1[5 chunks\n — mixed noise/signal]
+    subgraph Before["L2 — Hybrid top-5"]
+        H2[Hybrid + RRF] --> C2[Top-5\n — precision ~45%]
     end
 
-    subgraph After["L2 — Hybrid + RRF ✦ new"]
-        DE2[Embed query] --> QD2[(Qdrant\ndense top-20)]
-        SP2[TF-IDF BM25] --> QD3[(Qdrant\nsparse top-20)]
-        QD2 & QD3 -->|RRF fusion\nk=60| RRF[Ranked union\nof 40 candidates]
-        RRF --> C2[Top-5 fused chunks]
+    subgraph After["L3 — Hybrid + Rerank ✦ new"]
+        H3[Hybrid + RRF] --> POOL[Top-20 candidates]
+        POOL -->|cross-encoder\nms-marco-MiniLM-L-6-v2\nreads query+chunk together| CE[Re-scored pairs]
+        CE -->|sort desc, keep 5| C3[Top-5\n — precision ~55%]
     end
 
     style After fill:#e8f5e9
-    style SP2 fill:#fff9c4
-    style RRF fill:#fff9c4
+    style CE fill:#fff9c4
+    style POOL fill:#fff3e0
 ```
 
 ## Files you're adding
 
-- `tests/unit/test_hybrid_search.py`
-- `eval/results/lesson-2-baseline.json`
+- `tests/unit/test_reranking.py`
+- `eval/results/lesson-3-baseline.json`
 
 ## Files you're modifying
 
-- `app/services/vector_store.py` — `hybrid_search()` function (already present; verify RRF logic)
-- `app/services/sparse_vector_service.py` — TF-IDF sparse encoder (already present; verify `encode()`)
-- `app/services/rag_service.py` — `_retrieve()` hybrid branch (already present; trace the code path)
-- `app/models.py` — `search_mode: str = "dense"` is already there; students set it to `"hybrid"`
+- `app/services/reranking.py` — `Reranker.rerank()` (already present; trace `_rerank_local()`)
+- `app/services/rag_service.py` — step 2 in `_retrieve()`: `if enable_rerank and chunks: chunks = Reranker().rerank(...)`
+- `app/models.py` — `enable_rerank: bool = False` (students flip to `True`)
 
 ## Step-by-step build
 
-1. **Inspect `sparse_vector_service.py`.**
-   Confirm `SparseVectorService.encode(text: str) -> dict[int, float]` returns a token-index → weight mapping compatible with Qdrant's sparse vector format.
+1. **Inspect `Reranker._rerank_local()` in `reranking.py`.**
+   Confirm the local backend loads `CrossEncoder(settings.reranker_model)` (default: `ms-marco-MiniLM-L-6-v2`) and calls `model.predict([(query, chunk.text) for chunk in chunks])` to get relevance scores.
 
-2. **Inspect `hybrid_search()` in `vector_store.py`.**
-   The function should:
-   - Query Qdrant with the dense embedding (top-20 candidates).
-   - Query Qdrant with the sparse vector (top-20 candidates).
-   - Merge using RRF: `score(doc) = Σ 1 / (k + rank_in_list)` for each list.
-   - Return top-`top_k` by fused score.
-
-3. **Trace the hybrid branch in `_retrieve()`.**
-   In `app/services/rag_service.py`:
+2. **Understand the retrieve → rerank ordering.**
+   In `app/services/rag_service.py`, the pipeline is:
    ```python
-   elif search_mode == "hybrid":
-       embeddings = embed_texts([question])
-       query_embedding = embeddings[0]
-       chunks = hybrid_search(
-           query_embedding=query_embedding,
-           query_text=question,
-           top_k=top_k,
-           rrf_k=settings.rrf_k,
-       )
+   # 1. Retrieve (hybrid top-20)
+   chunks = hybrid_search(..., top_k=top_k * 4)   # fetch larger pool
+   # 2. Rerank
+   if enable_rerank and chunks:
+       chunks = Reranker().rerank(question, chunks, top_k=top_k)
    ```
-   The `rrf_k` setting (default `60`) is in `app/config.py`.
+   The reranker reduces 20 candidates to `top_k=5`, not the other way around.
 
-4. **Write a unit test confirming both retrievers are called.**
-   Create `tests/unit/test_hybrid_search.py`:
+3. **Add `enable_rerank` flag to a test request.**
+   In `app/models.py`, `enable_rerank: bool = False` should already exist. Verify it.
+
+4. **Write a unit test for the reranker.**
+   Create `tests/unit/test_reranking.py`:
    ```python
-   from unittest.mock import patch
-   from app.services.rag_service import _retrieve
+   from unittest.mock import patch, MagicMock
+   from app.services.reranking import Reranker
+   from app.models import RetrievedChunk
 
-   def test_hybrid_calls_both_retrievers():
-       with patch("app.services.rag_service.embed_texts") as me, \
-            patch("app.services.rag_service.hybrid_search") as mh:
-           me.return_value = [[0.0] * 1536]
-           mh.return_value = []
-           _retrieve("Show nodeSelector in a Pod spec", {
-               "search_mode": "hybrid", "top_k": 5,
-               "enable_rerank": False, "enable_crag": False, "enable_hyde": False
-           })
-           mh.assert_called_once()
+   def test_reranker_returns_top_k():
+       chunks = [RetrievedChunk(text=f"chunk {i}", source=f"doc{i}.html", score=float(i))
+                 for i in range(10)]
+       with patch("app.services.reranking.settings") as ms:
+           ms.reranker_backend = "local"
+           ms.reranker_model = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+           ms.reranker_initial_top_k = 5
+           r = Reranker()
+           with patch.object(r, "_rerank_local") as mock_local:
+               mock_local.return_value = chunks[:5]
+               result = r.rerank("test query", chunks, top_k=5)
+               assert len(result) == 5
    ```
-   Run: `uv run pytest tests/unit/test_hybrid_search.py -v`
+   Run: `uv run pytest tests/unit/test_reranking.py -v`
 
-5. **Run the hybrid eval and save the artifact.**
+5. **Run eval with reranking and save the artifact.**
    ```bash
-   make eval-hybrid
-   cp eval/results/$(ls -t eval/results/*_hybrid.json | head -1 | xargs basename) \
-      eval/results/lesson-2-baseline.json
+   make eval-rerank
+   cp eval/results/$(ls -t eval/results/*_hybrid+rerank.json | head -1 | xargs basename) \
+      eval/results/lesson-3-baseline.json
    ```
 
 ## Verification
 
 ### Quick smoke test
 
-Run the same query in three modes and compare the `sources` field:
-
 ```bash
-for MODE in dense sparse hybrid; do
-  echo "=== $MODE ==="; \
-  curl -sX POST http://localhost:8000/query \
-    -H "Authorization: Bearer $TOKEN" \
-    -H "Content-Type: application/json" \
-    -d "{\"question\":\"Show me a Pod manifest with nodeSelector and explain when to use it\",
-         \"search_mode\":\"$MODE\",\"enable_rerank\":false,\"enable_crag\":false,
-         \"enable_hyde\":false,\"enable_self_reflective\":false,\"top_k\":5}" \
-    | jq '.sources'; done
+curl -sX POST http://localhost:8000/query \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "question": "What is the best practice for managing application secrets securely?",
+    "search_mode": "hybrid",
+    "enable_hyde": false,
+    "enable_rerank": true,
+    "enable_crag": false,
+    "enable_self_reflective": false,
+    "top_k": 5
+  }' | jq '.sources[0], .chunks[0].score'
 ```
 
 Expected:
-- `dense` — `daemonset.html`, `pod-v1.docx` (conceptual, misses cheatsheet)
-- `sparse` — `pod-v1.docx`, `cheatsheet.txt` (literal YAML, misses conceptual)
-- `hybrid` — `pod-v1.docx`, `daemonset.html`, `cheatsheet.txt` (both signals)
+- Source: `secret.txt`
+- Score (with rerank ON): `~3.315` — roughly 100× higher than without reranking (`~0.033`)
+
+Compare side-by-side to confirm the boost:
+
+```bash
+# Without reranking
+curl -sX POST http://localhost:8000/query \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"question":"What is the best practice for managing application secrets securely?","search_mode":"hybrid","enable_rerank":false,"top_k":5}' \
+  | jq '.chunks[0].score'
+# Expected: ~0.033
+
+# With reranking
+curl -sX POST http://localhost:8000/query \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"question":"What is the best practice for managing application secrets securely?","search_mode":"hybrid","enable_rerank":true,"top_k":5}' \
+  | jq '.chunks[0].score'
+# Expected: ~3.315
+```
 
 ### Eval check
 
 ```bash
-make eval-hybrid
-uv run python -m eval.run_ragas --profile hybrid
+make eval-rerank
+uv run python -m eval.run_ragas --profile hybrid+rerank
 ```
 
-Expected: `context_recall ~45%` (up from 33% in L1). Open `eval/results/lesson-2-baseline.json` and compare to `eval/results/lesson-1-baseline.json`.
+Expected: `context_precision ~55%` (up from 45% in L2). Open `eval/results/lesson-3-baseline.json` and diff:
 
 ```bash
 uv run python -m eval.diff \
-  eval/results/lesson-1-baseline.json \
-  eval/results/lesson-2-baseline.json
+  eval/results/lesson-2-baseline.json \
+  eval/results/lesson-3-baseline.json
 ```
 
-Expected diff: `context_recall +12pp`, `answer_relevancy +3pp`.
+Expected: `context_precision +10pp`, `faithfulness slight lift`.
 
 ## What's next
 
-L3 adds a cross-encoder reranker on top of the hybrid top-20 candidate pool. The reranker re-reads each (query, chunk) pair holistically and re-scores — noise chunks that BM25 or dense incorrectly boosted will drop, and the precision of the top-5 delivered to the LLM will improve. Eval jumps to ~55%.
+L4 adds HyDE (Hypothetical Document Embeddings). Even with hybrid + reranking, queries like "Is there a way to isolate network traffic between services?" still fail because the user's vocabulary (`isolate traffic`) doesn't appear in the corpus — `NetworkPolicy` does. HyDE generates a hypothetical answer first, embeds *that*, and retrieves by the richer vocabulary. Eval jumps to ~65%.
 
 ## References
 
-- `DEMO_VIDEO_SCRIPT.md` section 3 (Hybrid search demo, `nodeSelector` query)
-- `eval/profiles.py` — `hybrid` profile
-- `app/services/vector_store.py` — `hybrid_search()`
-- `app/services/sparse_vector_service.py` — TF-IDF BM25 encoder
-- Robertson & Zaragoza (2009) — "The Probabilistic Relevance Framework: BM25 and Beyond"
+- `DEMO_VIDEO_SCRIPT.md` section 4 (Reranking demo, secrets query)
+- `eval/profiles.py` — `hybrid+rerank` profile
+- `app/services/reranking.py` — `Reranker` class
+- Nogueira & Cho (2019) — "Passage Re-ranking with BERT"

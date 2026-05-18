@@ -1,15 +1,18 @@
-"""RAG service — Lesson 2: dense + sparse + hybrid retrieval.
+"""RAG service — Lesson 3: + cross-encoder reranking.
 
-L1 had only dense. L2 honors a `search_mode` flag:
-  - "dense"  : pure vector similarity (Qdrant)
-  - "sparse" : pure TF-IDF lexical match
-  - "hybrid" : Reciprocal Rank Fusion (RRF) of the two
+L2 had dense/sparse/hybrid retrieval. L3 adds an optional reranking
+step that pulls a wider initial set (20 candidates) and re-scores them
+with a cross-encoder to surface the most relevant top-K.
+
+Flag added in this lesson:
+  enable_rerank: bool   (default False)
 """
 
 from __future__ import annotations
 
 from loguru import logger
 
+from app.config import settings
 from app.models import (
     ChatResponse,
     ResponseMetadata,
@@ -20,6 +23,7 @@ from app.security.spotlighting import build_spotlighted_context
 from app.security.system_prompt import build_system_prompt
 from app.services.embedding_service import embed_texts
 from app.services.llm_service import generate
+from app.services.reranking import Reranker
 from app.services.vector_store import hybrid_search, search, sparse_search
 
 
@@ -37,19 +41,39 @@ def _search_mode(flags: dict | None) -> str:
     return flags.get("search_mode", "dense")
 
 
+def _enable_rerank(flags: dict | None) -> bool:
+    if not isinstance(flags, dict):
+        return False
+    return bool(flags.get("enable_rerank", False))
+
+
 def _retrieve(question: str, flags: dict | None = None) -> list[RetrievedChunk]:
-    """Pick a retrieval strategy based on `search_mode` in flags."""
-    top_k = _top_k_from_flags(flags)
+    """Retrieve + optionally rerank.
+
+    When `enable_rerank=True`, we fetch RERANKER_INITIAL_TOP_K candidates
+    (default 20) and let the cross-encoder pick the final top-K.
+    """
+    final_top_k = _top_k_from_flags(flags)
     mode = _search_mode(flags)
+    rerank = _enable_rerank(flags)
+
+    retrieve_k = settings.reranker_initial_top_k if rerank else final_top_k
 
     if mode == "sparse":
-        return sparse_search(question, top_k=top_k)
-    if mode == "hybrid":
+        chunks = sparse_search(question, top_k=retrieve_k)
+    elif mode == "hybrid":
         query_embedding = embed_texts([question])[0]
-        return hybrid_search(query_embedding, question, top_k=top_k)
-    # default: dense
-    query_embedding = embed_texts([question])[0]
-    return search(query_embedding, top_k=top_k)
+        chunks = hybrid_search(query_embedding, question, top_k=retrieve_k)
+    else:
+        query_embedding = embed_texts([question])[0]
+        chunks = search(query_embedding, top_k=retrieve_k)
+
+    if rerank and chunks:
+        chunks = Reranker().rerank(question, chunks, top_k=final_top_k)
+    else:
+        chunks = chunks[:final_top_k]
+
+    return chunks
 
 
 def _generate(question: str, chunks: list[RetrievedChunk]) -> ChatResponse:
@@ -71,9 +95,9 @@ def _generate(question: str, chunks: list[RetrievedChunk]) -> ChatResponse:
 
 
 def run_rag(question: str, flags: dict | int | None = None) -> ChatResponse:
-    """Retrieve (dense/sparse/hybrid) → generate."""
     mode = _search_mode(flags) if isinstance(flags, dict) else "dense"
-    logger.info("L2 RAG | search_mode={} top_k={}", mode, _top_k_from_flags(flags))
+    rerank = _enable_rerank(flags) if isinstance(flags, dict) else False
+    logger.info("L3 RAG | mode={} rerank={} top_k={}", mode, rerank, _top_k_from_flags(flags))
     chunks = _retrieve(question, flags=flags if isinstance(flags, dict) else None)
     return _generate(question, chunks)
 

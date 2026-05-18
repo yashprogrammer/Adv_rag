@@ -62,12 +62,12 @@ class ChatResponse(BaseModel):
 
 
 class QueryRequest(BaseModel):
-    """L2 QueryRequest — adds `search_mode` for hybrid retrieval.
+    """L3 QueryRequest — adds `enable_rerank` for cross-encoder reranking.
 
     Lesson-by-lesson evolution of flags:
       - L1: question + top_k
-      - L2: + search_mode (dense | sparse | hybrid)   ← THIS LESSON
-      - L3: + enable_rerank
+      - L2: + search_mode (dense | sparse | hybrid)
+      - L3: + enable_rerank                            ← THIS LESSON
       - L4: + enable_hyde
       - L5: + enable_crag
       - L6: + enable_self_reflective
@@ -80,6 +80,7 @@ class QueryRequest(BaseModel):
         description="User question",
     )
     search_mode: Literal["dense", "sparse", "hybrid"] = "dense"
+    enable_rerank: bool = False
     top_k: int = Field(default=5, ge=1, le=50)
 
     @field_validator("question")
